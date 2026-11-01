@@ -183,11 +183,34 @@
 | `updated_at` | updatedAt | Timestamptz(6) | DateTime | ✓ |  |  |
 | — | baseUnit | — | رابطه ← UnitOfMeasure | ✓ | | |
 | — | parts | — | رابطه ← Part[] |  | | |
+| — | bomForParts | — | رابطه ← PartMaterialRequirement[] |  | | |
 
 **ایندکس‌ها/یکتایی‌های سطح جدول:**
 
 - `@@index([materialType])`
 - `@@index([supplierName])`
+
+### PartMaterialRequirement → `part_material_requirements`
+
+سرانهٔ مصرف ماده اولیه هر قطعه (BOM ساده تک‌سطحی — فاز ۴، ورودی محاسبه کسری مواد) مقدار مصرف ماده (بر حسب واحد پایه ماده) به ازای یک عدد قطعه وزن معادل به کیلوگرم (اختیاری — برای گزارش کیلوگرمی)
+
+| ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
+|---|---|---|---|:-:|---|---|
+| `id` | id | Uuid | String | ✓ | uuid() | PK |
+| `part_id` | partId | Uuid | String | ✓ |  |  |
+| `material_id` | materialId | Uuid | String | ✓ |  |  |
+| `quantity_per_unit` | quantityPerUnit | Decimal(18, 4) | Decimal | ✓ |  |  |
+| `weight_kg_per_unit` | weightKgPerUnit | Decimal(18, 4) | Decimal? |  |  |  |
+| `notes` | notes | Text | String? |  |  |  |
+| `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
+| `updated_at` | updatedAt | Timestamptz(6) | DateTime | ✓ |  |  |
+| — | part | — | رابطه ← Part | ✓ | | |
+| — | material | — | رابطه ← Material | ✓ | | |
+
+**ایندکس‌ها/یکتایی‌های سطح جدول:**
+
+- `@@unique([partId, materialId])`
+- `@@index([materialId])`
 
 ### Part → `parts`
 
@@ -211,6 +234,7 @@
 | — | baseUnit | — | رابطه ← UnitOfMeasure | ✓ | | |
 | — | mainMaterial | — | رابطه ← Material? |  | | |
 | — | primaryCustomer | — | رابطه ← Customer? |  | | |
+| — | materialRequirements | — | رابطه ← PartMaterialRequirement[] |  | | |
 
 **ایندکس‌ها/یکتایی‌های سطح جدول:**
 
@@ -243,7 +267,7 @@
 
 ### Operation → `operations`
 
-عملیات تولید (برش، خالی‌بری، خم، پرس/فرم، جوش پرس، جوش CO2، رنگ، مونتاژ)
+عملیات تولید (برش، خالی‌بری، خم، پرس/فرم، جوش پرس، جوش CO2، رنگ، مونتاژ) آیا این عملیات به قالب نیاز دارد؟ (فاز ۴ — شرط صلاحیت ماشین)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -254,6 +278,7 @@
 | `description` | description | Text | String? |  |  |  |
 | `default_setup_time_min` | defaultSetupTimeMin | Int? | Int? |  |  |  |
 | `default_cycle_time_sec` | defaultCycleTimeSec | Decimal(10, 2) | Decimal? |  |  |  |
+| `requires_die` | requiresDie | Boolean | Boolean | ✓ | false |  |
 | `is_active` | isActive | Boolean | Boolean | ✓ | true |  |
 
 ### PartRoute → `part_routes`
@@ -283,7 +308,7 @@
 
 ### PartRouteStep → `part_route_steps`
 
-مرحله مسیر تولید
+مرحله مسیر تولید حداقل تناژ پرس برای این مرحله (فاز ۴ — شرط صلاحیت ماشین)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -295,6 +320,7 @@
 | `setup_time_min` | setupTimeMin | Int? | Int? |  |  |  |
 | `cycle_time_sec` | cycleTimeSec | Decimal(10, 2) | Decimal? |  |  |  |
 | `scrap_factor_pct` | scrapFactorPct | Decimal(5, 2) | Decimal | ✓ | 0 |  |
+| `required_tonnage` | requiredTonnage | Decimal(10, 2) | Decimal? |  |  |  |
 | `description` | description | Text | String? |  |  |  |
 | — | route | — | رابطه ← PartRoute | ✓ | | |
 | — | operation | — | رابطه ← Operation | ✓ | | |
@@ -326,6 +352,7 @@
 | `notes` | notes | Text | String? |  |  |  |
 | `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
 | `updated_at` | updatedAt | Timestamptz(6) | DateTime | ✓ |  |  |
+| — | planOpRecommendations | — | رابطه ← PlanLineOperation[] |  | | |
 
 **ایندکس‌ها/یکتایی‌های سطح جدول:**
 
@@ -364,6 +391,7 @@
 | `notes` | notes | Text | String? |  |  |  |
 | `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
 | `updated_at` | updatedAt | Timestamptz(6) | DateTime | ✓ |  |  |
+| — | planOpRecommendations | — | رابطه ← PlanLineOperation[] |  | | |
 
 ### MachineDieCompatibility → `machine_die_compatibility`
 
@@ -415,6 +443,7 @@
 | — | documentLinesTo | — | رابطه ← InventoryDocumentLine[] |  | | |
 | — | transactions | — | رابطه ← InventoryTransaction[] |  | | |
 | — | balances | — | رابطه ← StockBalance[] |  | | |
+| — | operationWip | — | رابطه ← ProductionOperation[] |  | | |
 
 **ایندکس‌ها/یکتایی‌های سطح جدول:**
 
@@ -486,7 +515,7 @@
 
 ### ProductionPlan → `production_plans`
 
-برنامه تولید (سربرگ)
+برنامه تولید (سربرگ) شماره نسخه برنامه (هر بازتولید، نسخه جدیدی می‌سازد) برنامه‌ای که این برنامه بازنگری آن است (زنجیره نسخه‌ها) زمان اجرای موتور برنامه‌ریزی پارامترهای اجرا (افق، بازه تاریخ سررسید، فیلتر سفارش‌ها) خلاصه سطح برنامه (تعداد ردیف، ناکارآمد، کسری ماده، ...)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -500,10 +529,16 @@
 | `created_by_id` | createdById | Uuid | String | ✓ |  |  |
 | `confirmed_at` | confirmedAt | Timestamptz(6) | DateTime? |  |  |  |
 | `confirmed_by_id` | confirmedById | Uuid | String? |  |  |  |
+| `version` | version | Int | Int | ✓ | 1 |  |
+| `revision_of_id` | revisionOfId | Uuid | String? |  |  | UNIQUE |
+| `planning_run_at` | planningRunAt | Timestamptz(6) | DateTime? |  |  |  |
+| `planning_params` | planningParams | Json? | Json? |  |  |  |
 | `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
 | `updated_at` | updatedAt | Timestamptz(6) | DateTime | ✓ |  |  |
 | — | createdBy | — | رابطه ← User | ✓ | | |
 | — | confirmedBy | — | رابطه ← User? |  | | |
+| — | revisionOf | — | رابطه ← ProductionPlan? |  | | |
+| — | revisions | — | رابطه ← ProductionPlan[] |  | | |
 
 **ایندکس‌ها/یکتایی‌های سطح جدول:**
 
@@ -513,7 +548,7 @@
 
 ### ProductionPlanLine → `production_plan_lines`
 
-ردیف برنامه تولید
+ردیف برنامه تولید مسیر تولید استفاده‌شده برای محاسبه نسخه مسیر استفاده‌شده تاریخ سررسید اثرگذار (سررسید ردیف سفارش) تقاضای ناخالص (سفارش باز منهای تحویل‌شده) پوشش با موجودی آزاد محصول تکمیلی (تأیید کیفیت، مالی، انبار فعال) پوشش با رزروهای فعال برای همین ردیف سفارش پوشش با WIP قابل استفاده در عملیات‌ها پوشش با دستور کارهای باز قبلی (PLANNED/RELEASED/IN_PROGRESS) آیا ردیف از نظر عملیات و مواد قابل اجراست؟ جزئیات کامل قطع‌بوش (ردیف‌های تقاضا، زنجیره WIP، هشدارها، اطلاعات ناقص)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -524,15 +559,89 @@
 | `planned_quantity` | plannedQuantity | Decimal(18, 4) | Decimal | ✓ |  |  |
 | `customer_order_line_id` | customerOrderLineId | Uuid | String? |  |  |  |
 | `notes` | notes | Text | String? |  |  |  |
+| `route_id` | routeId | Uuid | String? |  |  |  |
+| `route_version` | routeVersion | Int? | Int? |  |  |  |
+| `due_date` | dueDate | Date | DateTime? |  |  |  |
+| `gross_quantity` | grossQuantity | Decimal(18, 4) | Decimal? |  |  |  |
+| `covered_by_stock` | coveredByStock | Decimal(18, 4) | Decimal? |  |  |  |
+| `covered_by_reservations` | coveredByReservations | Decimal(18, 4) | Decimal? |  |  |  |
+| `covered_by_wip` | coveredByWip | Decimal(18, 4) | Decimal? |  |  |  |
+| `covered_by_planned_mos` | coveredByPlannedMos | Decimal(18, 4) | Decimal? |  |  |  |
+| `feasible` | feasible | Boolean | Boolean | ✓ | true |  |
 | — | plan | — | رابطه ← ProductionPlan | ✓ | | |
 | — | part | — | رابطه ← Part | ✓ | | |
 | — | customerOrderLine | — | رابطه ← CustomerOrderLine? |  | | |
+| — | route | — | رابطه ← PartRoute? |  | | |
 
 **ایندکس‌ها/یکتایی‌های سطح جدول:**
 
 - `@@unique([planId, lineNo])`
 - `@@index([partId])`
 - `@@index([customerOrderLineId])`
+- `@@index([routeId])`
+
+### PlanLineOperation → `plan_line_operations`
+
+تحلیل عملیات‌به‌عملیات برنامه برای یک ردیف برنامه (فاز ۴) خروجی موردنیاز از این عملیات WIP آماده انتقال در همین عملیات (تولیدشده و منتظر) سهم WIP استفاده‌شده برای پوشش خروجی موردنیاز تولید جدید لازم در این عملیات ورودی لازم این عملیات (پس از ضریب ضایعات) واحدهای رسیده به این عملیات و منتظر پردازش (خروجی عملیات قبل که منتقل شده است) منبع زمان سیکل: ROUTE_STEP | CAPABILITY | OPERATION_DEFAULT | MISSING منبع زمان راه‌اندازی: ROUTE_STEP | OPERATION_DEFAULT | NOT_DEFINED کد ماشین پیشنهادی (اسنپ‌شات) کد قالب پیشنهادی (اسنپ‌شات) رتبه پیشنهاد (۱ = بهترین) فهرست رتبه‌بندی کامل ماشین‌های نامزد با دلایل (JSON)
+
+| ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
+|---|---|---|---|:-:|---|---|
+| `id` | id | Uuid | String | ✓ | uuid() | PK |
+| `plan_line_id` | planLineId | Uuid | String | ✓ |  |  |
+| `operation_id` | operationId | Uuid | String | ✓ |  |  |
+| `route_step_id` | routeStepId | Uuid | String? |  |  |  |
+| `required_output` | requiredOutput | Decimal(18, 4) | Decimal | ✓ |  |  |
+| `wip_quantity` | wipQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `wip_used` | wipUsed | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `must_produce` | mustProduce | Decimal(18, 4) | Decimal | ✓ |  |  |
+| `required_input` | requiredInput | Decimal(18, 4) | Decimal | ✓ |  |  |
+| `arriving_quantity` | arrivingQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `time_source` | timeSource | VarChar(32) | String? |  |  |  |
+| `estimated_hours` | estimatedHours | Decimal(12, 4) | Decimal? |  |  |  |
+| `setup_minutes` | setupMinutes | Int? | Int? |  |  |  |
+| `setup_source` | setupSource | VarChar(32) | String? |  |  |  |
+| `feasible` | feasible | Boolean | Boolean | ✓ | true |  |
+| `missing_info` | missingInfo | Json? | Json? |  |  |  |
+| `recommended_machine_id` | recommendedMachineId | Uuid | String? |  |  |  |
+| `recommended_die_id` | recommendedDieId | Uuid | String? |  |  |  |
+| `recommended_machine_code` | recommendedMachineCode | VarChar(32) | String? |  |  |  |
+| `recommended_die_code` | recommendedDieCode | VarChar(32) | String? |  |  |  |
+| `recommended_rank` | recommendedRank | Int? | Int? |  |  |  |
+| — | planLine | — | رابطه ← ProductionPlanLine | ✓ | | |
+| — | operation | — | رابطه ← Operation | ✓ | | |
+| — | routeStep | — | رابطه ← PartRouteStep? |  | | |
+| — | recommendedMachine | — | رابطه ← Machine? |  | | |
+| — | recommendedDie | — | رابطه ← Die? |  | | |
+
+**ایندکس‌ها/یکتایی‌های سطح جدول:**
+
+- `@@unique([planLineId, sequence])`
+- `@@index([operationId])`
+- `@@index([recommendedMachineId])`
+
+### PlanLineMaterialShortage → `plan_line_material_shortages`
+
+کسری ماده اولیه شناسایی‌شده برای یک ردیف برنامه (فاز ۴) شدت: OK | SHORTAGE_COVERED_BY_CONTRACT | SHORTAGE | MISSING_BOM سهم موجودی امانی SAPCO در قابل استفاده مقدار پوشش‌پذیر با قراردادهای باز (تحویل آینده) خلاصه قراردادهای باز مرتبط
+
+| ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
+|---|---|---|---|:-:|---|---|
+| `id` | id | Uuid | String | ✓ | uuid() | PK |
+| `plan_line_id` | planLineId | Uuid | String | ✓ |  |  |
+| `material_id` | materialId | Uuid | String | ✓ |  |  |
+| `severity` | severity | VarChar(32) | String | ✓ |  |  |
+| `required_quantity` | requiredQuantity | Decimal(18, 4) | Decimal | ✓ |  |  |
+| `available_quantity` | availableQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `consignment_quantity` | consignmentQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `shortage_quantity` | shortageQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `covered_by_open_contracts` | coveredByOpenContracts | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `notes` | notes | Text | String? |  |  |  |
+| — | planLine | — | رابطه ← ProductionPlanLine | ✓ | | |
+| — | material | — | رابطه ← Material | ✓ | | |
+
+**ایندکس‌ها/یکتایی‌های سطح جدول:**
+
+- `@@unique([planLineId, materialId])`
+- `@@index([materialId])`
 
 ### ManufacturingOrder → `manufacturing_orders`
 
@@ -569,7 +678,7 @@
 
 ### ProductionOperation → `production_operations`
 
-عملیات اجرایی یک دستور کار
+عملیات اجرایی یک دستور کار مجموع دریافتی‌شده از عملیات قبل (یا خوراک اولیه) مجموع ورودی تغذیه‌شده به ماشین (شامل تغذیه‌ی مجدد بازکار) مردود (غیرقابل بازکاری) — جدا از ضایعات بازکار — برای تغذیه‌ی مجدد در گزارش‌های بعدی مجموع انتقال‌یافته به عملیات بعد / انبار محصول موقعیت فیزیکی WIP این عملیات مبنای محاسبه قداره (از لحظه‌ای که WIP این عملیات از صفر بزرگ شد)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -584,8 +693,15 @@
 | `actual_start` | actualStart | Timestamptz(6) | DateTime? |  |  |  |
 | `actual_end` | actualEnd | Timestamptz(6) | DateTime? |  |  |  |
 | `planned_quantity` | plannedQuantity | Decimal(18, 4) | Decimal | ✓ |  |  |
+| `received_quantity` | receivedQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `input_quantity` | inputQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
 | `produced_quantity` | producedQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
 | `scrapped_quantity` | scrappedQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `rejected_quantity` | rejectedQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `rework_quantity` | reworkQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `transferred_out_quantity` | transferredOutQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
+| `wip_location_id` | wipLocationId | Uuid | String? |  |  |  |
+| `wip_since_at` | wipSinceAt | Timestamptz(6) | DateTime? |  |  |  |
 | `notes` | notes | Text | String? |  |  |  |
 | `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
 | `updated_at` | updatedAt | Timestamptz(6) | DateTime | ✓ |  |  |
@@ -593,6 +709,7 @@
 | — | operation | — | رابطه ← Operation | ✓ | | |
 | — | routeStep | — | رابطه ← PartRouteStep? |  | | |
 | — | machine | — | رابطه ← Machine? |  | | |
+| — | wipLocation | — | رابطه ← WarehouseLocation? |  | | |
 | — | outgoingTransfers | — | رابطه ← ProductionTransfer[] |  | | |
 | — | incomingTransfers | — | رابطه ← ProductionTransfer[] |  | | |
 
@@ -605,7 +722,7 @@
 
 ### ProductionReport → `production_reports`
 
-گزارش تولید (تولید شیفت/روز) — وضعیت سند و وضعیت قطع‌بوش جدا است
+گزارش تولید (تولید شیفت/روز) — وضعیت سند و وضعیت قطع‌بوش جدا است ورودی تغذیه‌شده در این گزارش (خوراک ماشین) مردود (غیرقابل بازیابی) — جدا از ضایعات و بازکار
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -617,7 +734,9 @@
 | `shift_id` | shiftId | Uuid | String? |  |  |  |
 | `operator_id` | operatorId | Uuid | String? |  |  |  |
 | `report_date` | reportDate | Date | DateTime | ✓ |  |  |
+| `input_quantity` | inputQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
 | `produced_quantity` | producedQuantity | Decimal(18, 4) | Decimal | ✓ |  |  |
+| `rejected_quantity` | rejectedQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
 | `rework_quantity` | reworkQuantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
 | — | status | — | رابطه ← ReportStatus | ✓ | | |
 | — | postingStatus | — | رابطه ← PostingStatus | ✓ | | |
@@ -731,7 +850,7 @@
 
 ### InventoryDocument → `inventory_documents`
 
-سند انبار (رسید/حواله/انتقال/اصلاحیه) — وضعیت سند و قطع‌بوش جدا است
+سند انبار (رسید/حواله/انتقال/اصلاحیه) — وضعیت سند و قطع‌بوش جدا است علت اصلاحیه/افتتاحیه — برای سندهای ADJUSTMENT الزامی است (قاعده ۹ فاز ۲)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -749,6 +868,8 @@
 | `posted_by_id` | postedById | Uuid | String? |  |  |  |
 | `posted_at` | postedAt | Timestamptz(6) | DateTime? |  |  |  |
 | `reversal_of_id` | reversalOfId | Uuid | String? |  |  |  |
+| — | reasonCode | — | رابطه ← AdjustmentReason? |  | | |
+| `reason_text` | reasonText | VarChar(500) | String? |  |  |  |
 | `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
 | `updated_at` | updatedAt | Timestamptz(6) | DateTime | ✓ |  |  |
 | — | warehouse | — | رابطه ← Warehouse | ✓ | | |
@@ -768,7 +889,7 @@
 
 ### InventoryDocumentLine → `inventory_document_lines`
 
-ردیف سند انبار
+ردیف سند انبار برای رسیدهای جدید: شماره لوت برای ساخت لوت هنگام قطع‌بوش مالکیت/کیفیت مشخص‌شده روی ردیف (پیش‌فرض در زمان قطع‌بوش تعیین می‌شود) قرارداد SAPCO مرتبط با رسید ماده اولیه (دفتر کل قرارداد) رزرو مصرف‌شده توسط این ردیف حواله
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -783,8 +904,14 @@
 | `weight_kg` | weightKg | Decimal(18, 4) | Decimal? |  |  |  |
 | `from_location_id` | fromLocationId | Uuid | String? |  |  |  |
 | `to_location_id` | toLocationId | Uuid | String? |  |  |  |
+| `lot_number` | lotNumber | VarChar(64) | String? |  |  |  |
+| — | qualityStatus | — | رابطه ← QualityStatus? |  | | |
+| `contract_id` | contractId | Uuid | String? |  |  |  |
+| `reservation_id` | reservationId | Uuid | String? |  |  |  |
 | `notes` | notes | Text | String? |  |  |  |
 | — | document | — | رابطه ← InventoryDocument | ✓ | | |
+| — | contract | — | رابطه ← MaterialContract? |  | | |
+| — | reservation | — | رابطه ← InventoryReservation? |  | | |
 | — | part | — | رابطه ← Part? |  | | |
 | — | material | — | رابطه ← Material? |  | | |
 | — | lot | — | رابطه ← MaterialLot? |  | | |
@@ -801,7 +928,7 @@
 
 ### InventoryTransaction → `inventory_transactions`
 
-تراکنش انبار — دفتر کل تغییرناپذیر (immutable ledger)
+تراکنش انبار — دفتر کل تغییرناپذیر (immutable ledger) مالکیت و وضعیت کیفی — بخشی از کلید موجودی (جداسازی ورق امانی SAPCO و قرنطینه کیفیت)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -818,6 +945,8 @@
 | `unit_id` | unitId | Uuid | String | ✓ |  |  |
 | `weight_kg` | weightKg | Decimal(18, 4) | Decimal? |  |  |  |
 | `occurred_at` | occurredAt | Timestamptz(6) | DateTime | ✓ | now() |  |
+| — | ownership | — | رابطه ← StockOwnership | ✓ | | |
+| — | qualityStatus | — | رابطه ← QualityStatus | ✓ | | |
 | `reversal_of_id` | reversalOfId | Uuid | String? |  |  |  |
 | `created_by_id` | createdById | Uuid | String? |  |  |  |
 | `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
@@ -844,6 +973,8 @@
 - `@@index([lotId])`
 - `@@index([occurredAt])`
 - `@@index([type])`
+- `@@index([ownership])`
+- `@@index([qualityStatus])`
 
 ### InventoryReservation → `inventory_reservations`
 
@@ -882,7 +1013,7 @@
 
 ### StockBalance → `stock_balances`
 
-موجودی رسمی انبار — فقط سمت سرور و در همان تراکنش دیتابیسِ ثبت، به‌روزرسانی می‌شود
+موجودی رسمی انبار — فقط سمت سرور و در همان تراکنش دیتابیسِ ثبت، به‌روزرسانی می‌شود واحد شمارش این موجودی (عدد یا کیلوگرم — سطرها به‌تفکیک واحد) کلید قطعی برای upsert اتمی (dimها می‌توانند NULL باشند؛ ترکیب NULL در Postgres یکتا نیست)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -892,6 +1023,10 @@
 | `warehouse_id` | warehouseId | Uuid | String | ✓ |  |  |
 | `location_id` | locationId | Uuid | String? |  |  |  |
 | `lot_id` | lotId | Uuid | String? |  |  |  |
+| `unit_id` | unitId | Uuid | String | ✓ |  |  |
+| — | ownership | — | رابطه ← StockOwnership | ✓ | | |
+| — | qualityStatus | — | رابطه ← QualityStatus | ✓ | | |
+| `balance_key` | balanceKey | VarChar(220) | String | ✓ |  | UNIQUE |
 | `quantity` | quantity | Decimal(18, 4) | Decimal | ✓ | 0 |  |
 | `weight_kg` | weightKg | Decimal(18, 4) | Decimal | ✓ | 0 |  |
 | `last_transaction_at` | lastTransactionAt | Timestamptz(6) | DateTime? |  |  |  |
@@ -901,19 +1036,21 @@
 | — | warehouse | — | رابطه ← Warehouse | ✓ | | |
 | — | location | — | رابطه ← WarehouseLocation? |  | | |
 | — | lot | — | رابطه ← MaterialLot? |  | | |
+| — | unit | — | رابطه ← UnitOfMeasure | ✓ | | |
 
 **ایندکس‌ها/یکتایی‌های سطح جدول:**
 
-- `@@unique([partId, materialId, warehouseId, locationId, lotId])`
 - `@@index([warehouseId])`
 - `@@index([partId])`
 - `@@index([materialId])`
 - `@@index([locationId])`
 - `@@index([lotId])`
+- `@@index([ownership])`
+- `@@index([qualityStatus])`
 
 ### MaterialLot → `material_lots`
 
-بچ/لوت ماده اولیه (ردیابی ورق‌های دریافتی از SAPCO)
+بچ/لوت ماده اولیه (ردیابی ورق‌های دریافتی از SAPCO) ورق امانی SAPCO در سطح لوت علامت‌گذاری می‌شود
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -925,6 +1062,7 @@
 | `quantity_remaining` | quantityRemaining | Decimal(18, 4) | Decimal | ✓ |  |  |
 | `weight_received_kg` | weightReceivedKg | Decimal(18, 4) | Decimal | ✓ |  |  |
 | `weight_remaining_kg` | weightRemainingKg | Decimal(18, 4) | Decimal | ✓ |  |  |
+| — | ownership | — | رابطه ← StockOwnership | ✓ | | |
 | — | status | — | رابطه ← LotStatus | ✓ | | |
 | `certificate_number` | certificateNumber | VarChar(190) | String? |  |  |  |
 | `supplier_lot_number` | supplierLotNumber | VarChar(190) | String? |  |  |  |
@@ -994,6 +1132,6 @@
 
 ## آمار
 
-- تعداد مدل‌ها: **39**
-- تعداد فیلدها: **497**
+- تعداد مدل‌ها: **42**
+- تعداد فیلدها: **594**
 - دیتابیس: PostgreSQL 15+ (توسعه: 17.11)

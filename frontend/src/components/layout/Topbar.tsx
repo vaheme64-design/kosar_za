@@ -17,7 +17,9 @@ export function Topbar({ onMenu }: TopbarProps) {
     return () => clearInterval(t);
   }, []);
 
-  const current = MODULES.find((m) => m.path === location.pathname);
+  const current =
+    MODULES.filter((m) => m.path !== '/').find((m) => location.pathname.startsWith(m.path)) ??
+    MODULES.find((m) => m.path === location.pathname);
 
   return (
     <header className="topbar">

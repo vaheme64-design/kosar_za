@@ -1,6 +1,8 @@
 import * as dotenv from 'dotenv';
-dotenv.config({ override: true }); // backend/.env is the source of truth when present;
-                                   // in production no .env ships — secrets come from the environment
+// backend/.env is the source of truth when present; in test mode real
+// environment variables (set by the vitest runner) take precedence, and in
+// production no .env ships — secrets come from the environment.
+dotenv.config({ override: process.env.NODE_ENV !== 'test' });
 import { z } from 'zod';
 
 /**

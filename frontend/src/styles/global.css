@@ -916,3 +916,142 @@ code {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ==========================================================================
+   Phases 2 & 3 — inventory / production / WIP UI
+   ========================================================================== */
+
+.page { display: flex; flex-direction: column; gap: 16px; }
+.page__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.page__title { margin: 0; font-size: 1.35rem; font-weight: 800; color: var(--text); }
+.page__subtitle { margin: 4px 0 0; color: var(--text-2); font-size: 0.85rem; }
+.page__actions { display: flex; gap: 8px; }
+
+.muted { color: var(--text-3); font-size: 0.82rem; }
+.text-ok { color: #15803d; }
+.text-danger { color: var(--danger); }
+.text-warn { color: var(--warn); }
+.text-info { color: var(--info); }
+
+/* ---- sub navigation ---- */
+.subnav { display: flex; gap: 6px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 6px; }
+.subnav__link { padding: 7px 14px; border-radius: 9px; font-size: 0.85rem; color: var(--text-2); text-decoration: none; white-space: nowrap; }
+.subnav__link:hover { background: var(--bg); color: var(--text); }
+.subnav__link.is-active { background: var(--primary-soft); color: var(--primary-strong); font-weight: 700; }
+
+/* ---- stat cards (tones) ---- */
+.stat-grid--wide { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.stat-card--primary .stat-card__icon { background: var(--primary-soft); color: var(--primary-strong); }
+.stat-card--ok .stat-card__icon { background: #dcfce7; color: #15803d; }
+.stat-card--warn .stat-card__icon { background: var(--warn-soft); color: var(--warn); }
+.stat-card--danger .stat-card__icon { background: var(--danger-soft); color: var(--danger); }
+.stat-card--info .stat-card__icon { background: var(--info-soft); color: var(--info); }
+.stat-card--muted .stat-card__icon { background: var(--bg); color: var(--text-2); }
+
+/* ---- alerts / loading / empty ---- */
+.alert--ok { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.loading { display: flex; align-items: center; gap: 8px; color: var(--text-2); padding: 24px 8px; font-size: 0.9rem; }
+.loading__dot { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+.empty { text-align: center; padding: 42px 16px; color: var(--text-2); }
+.empty__icon { display: flex; justify-content: center; margin-bottom: 8px; color: var(--text-3); }
+.empty__title { font-weight: 700; color: var(--text); }
+.empty__hint { font-size: 0.85rem; margin-top: 4px; }
+
+/* ---- cards / tables ---- */
+.card__actions { display: flex; gap: 8px; margin-inline-start: auto; }
+.table-wrap { overflow-x: auto; }
+.table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.table th { text-align: right; padding: 9px 10px; background: var(--bg); color: var(--text-2); font-weight: 700; white-space: nowrap; border-bottom: 1px solid var(--border); }
+.table td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.table tbody tr:hover { background: #fafcfd; }
+.table--dense th, .table--dense td { padding: 6px 8px; font-size: 0.8rem; }
+.row--reversal { background: #fff7f7; }
+.qty-unit { color: var(--text-3); font-size: 0.78rem; }
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.link-btn { background: none; border: none; color: var(--primary-strong); cursor: pointer; font: inherit; font-weight: 700; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
+.see-all { display: inline-flex; align-items: center; gap: 4px; color: var(--primary-strong); font-size: 0.85rem; text-decoration: none; font-weight: 700; }
+
+/* ---- badges ---- */
+.badge--ok { background: #dcfce7; color: #166534; }
+.badge--warn { background: var(--warn-soft); color: var(--warn); }
+.badge--danger { background: var(--danger-soft); color: var(--danger); }
+.badge--info { background: var(--info-soft); color: var(--info); }
+.badge--primary { background: var(--primary-soft); color: var(--primary-strong); }
+.badge--muted { background: var(--bg); color: var(--text-2); }
+
+/* ---- forms ---- */
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; align-items: end; padding: 4px 0; }
+.form-grid--wide { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.form-grid__action { display: flex; align-items: end; padding-bottom: 4px; }
+.field__label { display: flex; gap: 4px; align-items: center; font-size: 0.8rem; color: var(--text-2); margin-bottom: 5px; font-weight: 600; }
+.field__req { color: var(--danger); }
+.field__hint { display: block; font-size: 0.72rem; color: var(--text-3); margin-top: 3px; }
+.input { width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; font: inherit; font-size: 0.86rem; background: var(--surface); color: var(--text); }
+.input:focus { outline: 2px solid var(--primary-soft); border-color: var(--primary); }
+.input--select { appearance: auto; }
+.inline-controls { display: flex; gap: 6px; }
+.inline-controls > * { flex: 1; min-width: 0; }
+.form-actions { display: flex; gap: 10px; flex-wrap: wrap; padding: 4px 0 12px; }
+.btn--danger { background: var(--danger); color: #fff; }
+.btn--danger:hover { background: #991b1b; }
+.btn--warn { background: var(--warn-soft); color: var(--warn); border: 1px solid #fde68a; }
+.btn--warn:hover { background: #fde68a; }
+
+/* ---- lines editor ---- */
+.lines-editor { display: flex; flex-direction: column; gap: 14px; }
+.line-row { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: #fbfdfe; }
+.line-row__head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.line-summary { display: flex; align-items: end; padding-bottom: 6px; }
+
+/* ---- modal ---- */
+.modal-overlay { position: fixed; inset: 0; background: rgba(10, 20, 30, 0.45); display: flex; align-items: center; justify-content: center; z-index: 60; padding: 16px; }
+.modal { background: var(--surface); border-radius: 16px; width: min(680px, 100%); max-height: 88vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.25); }
+.modal--wide { width: min(980px, 100%); }
+.modal__head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+.modal__head h3 { margin: 0; font-size: 1rem; }
+.modal__close { border: none; background: var(--bg); border-radius: 8px; width: 30px; height: 30px; cursor: pointer; color: var(--text-2); }
+.modal__body { padding: 16px 18px; }
+.modal-section-title { margin: 16px 0 8px; font-size: 0.9rem; color: var(--text); }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; font-size: 0.86rem; margin-bottom: 10px; }
+.detail-grid .span-2 { grid-column: span 2; }
+
+/* ---- progress ---- */
+.progress { position: relative; background: var(--bg); border-radius: 999px; height: 20px; overflow: hidden; border: 1px solid var(--border); }
+.progress__bar { height: 100%; background: linear-gradient(90deg, var(--primary), #14b8a6); transition: width 0.4s ease; }
+.progress__label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 0.72rem; font-weight: 700; color: var(--text); }
+
+/* ---- dashboard quick links ---- */
+.quick-links { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; padding: 8px 0; }
+.quick-link { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 11px; padding: 12px; text-decoration: none; color: var(--text); font-size: 0.85rem; font-weight: 600; background: #fbfdfe; }
+.quick-link:hover { border-color: var(--primary); color: var(--primary-strong); background: var(--primary-soft); }
+
+/* ---- production ops flow ---- */
+.ops-flow { display: flex; flex-direction: column; gap: 12px; }
+.op-card { border: 1px solid var(--border); border-radius: 14px; padding: 14px; background: #fbfdfe; }
+.op-card__head { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.op-card__seq { width: 32px; height: 32px; border-radius: 10px; background: var(--primary-soft); color: var(--primary-strong); display: flex; align-items: center; justify-content: center; font-weight: 800; flex-shrink: 0; }
+.op-card__actions { margin-inline-start: auto; }
+.op-quantities { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.8rem; color: var(--text-2); }
+.op-quantities b { color: var(--text); }
+.op-reports summary { cursor: pointer; font-size: 0.8rem; color: var(--primary-strong); font-weight: 700; margin-top: 10px; }
+.op-reports { margin-top: 6px; }
+.op-hint { background: var(--info-soft); color: var(--info); border-radius: 10px; padding: 9px 12px; font-size: 0.8rem; margin-top: 10px; }
+.scrap-row { border-top: 1px dashed var(--border); padding-top: 8px; }
+.balance-check { margin-top: 12px; border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; font-weight: 700; }
+.balance-check--ok { background: #dcfce7; color: #166534; }
+.balance-check--bad { background: var(--danger-soft); color: var(--danger); }
+
+/* ------------------------------------------------------------------
+   Phase 4 — production planning (chip row, plan line cards, candidates)
+   ------------------------------------------------------------------ */
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chip--ok { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+.chip--danger { background: var(--danger-soft, #fee2e2); color: var(--danger, #b91c1c); border-color: #fecaca; }
+.chip--warn { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+.chip--info { background: var(--info-soft, #e0f2fe); color: var(--info, #0369a1); border-color: #bae6fd; }
+.chip--primary { background: var(--primary-strong); color: #fff; border-color: var(--primary-strong); }
+.op-card__best { border: 1px dashed var(--border); border-radius: 10px; padding: 10px 12px; background: #fff; margin-bottom: 8px; }
+.op-card__details summary { cursor: pointer; color: var(--primary-strong); font-size: 0.82rem; font-weight: 700; margin: 6px 0; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.row-muted { opacity: 0.62; }

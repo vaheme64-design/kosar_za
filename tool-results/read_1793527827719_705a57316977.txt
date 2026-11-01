@@ -1,0 +1,1348 @@
+     1→// ============================================================================
+     2→// KPIMS — Kosar Production & Inventory Management System
+     3→// سامانه برنامه‌ریزی تولید و مدیریت موجودی کوثر
+     4→//
+     5→// Phase 1 — initial relational schema (PostgreSQL 15+ / Prisma)
+     6→//
+     7→// Conventions:
+     8→//   • Tables/columns are snake_case (via @@map / @map) for ERP-friendly SQL.
+     9→//   • Primary keys are UUID v4 (@db.Uuid).
+    10→//   • All quantities/weights are Decimal (no floating point for inventory).
+    11→//   • Timestamps are stored in UTC (timestamptz); business dates use DATE
+    12→//     and are displayed in the Jalali calendar by the application layer.
+    13→//   • Document status (workflow) and posting status (accounting effect) are
+    14→//     kept separate; posted documents must never be silently edited/deleted
+    15→//     (enforced by FK onDelete: Restrict and future service-layer rules).
+    16→//   • Inventory transactions form an immutable ledger; corrections are made
+    17→//     with reversal documents referencing the original transaction.
+    18→// ============================================================================
+    19→
+    20→generator client {
+    21→  provider = "prisma-client-js"
+    22→}
+    23→
+    24→datasource db {
+    25→  provider = "postgresql"
+    26→  url      = env("DATABASE_URL")
+    27→}
+    28→
+    29→// ============================================================================
+    30→// ENUMS
+    31→// ============================================================================
+    32→
+    33→enum UnitKind {
+    34→  COUNT
+    35→  WEIGHT
+    36→  LENGTH
+    37→  AREA
+    38→
+    39→  @@map("unit_kind")
+    40→}
+    41→
+    42→enum MaterialType {
+    43→  SHEET
+    44→  COIL
+    45→  PROFILE
+    46→  PAINT
+    47→  CONSUMABLE
+    48→  OTHER
+    49→
+    50→  @@map("material_type")
+    51→}
+    52→
+    53→enum MaterialStatus {
+    54→  ACTIVE
+    55→  INACTIVE
+    56→
+    57→  @@map("material_status")
+    58→}
+    59→
+    60→enum PartType {
+    61→  FINISHED_PART
+    62→  SEMI_FINISHED
+    63→  SUBASSEMBLY
+    64→
+    65→  @@map("part_type")
+    66→}
+    67→
+    68→enum PartStatus {
+    69→  ACTIVE
+    70→  INACTIVE
+    71→  PHASED_OUT
+    72→
+    73→  @@map("part_status")
+    74→}
+    75→
+    76→enum RouteStatus {
+    77→  DRAFT
+    78→  ACTIVE
+    79→  RETIRED
+    80→
+    81→  @@map("route_status")
+    82→}
+    83→
+    84→enum MachineType {
+    85→  PRESS
+    86→  CUTTING
+    87→  PRESS_WELDING
+    88→  CO2_WELDING
+    89→  PAINTING
+    90→  ASSEMBLY
+    91→  OTHER
+    92→
+    93→  @@map("machine_type")
+    94→}
+    95→
+    96→enum MachineStatus {
+    97→  ACTIVE
+    98→  MAINTENANCE
+    99→  BREAKDOWN
+   100→  RETIRED
+   101→
+   102→  @@map("machine_status")
+   103→}
+   104→
+   105→enum DieStatus {
+   106→  ACTIVE
+   107→  MAINTENANCE
+   108→  RETIRED
+   109→
+   110→  @@map("die_status")
+   111→}
+   112→
+   113→enum WarehouseType {
+   114→  RAW_MATERIAL
+   115→  WIP
+   116→  FINISHED_GOODS
+   117→  SCRAP
+   118→  TOOLS
+   119→
+   120→  @@map("warehouse_type")
+   121→}
+   122→
+   123→enum CustomerOrderStatus {
+   124→  DRAFT
+   125→  CONFIRMED
+   126→  IN_PRODUCTION
+   127→  PARTIALLY_DELIVERED
+   128→  DELIVERED
+   129→  CANCELLED
+   130→
+   131→  @@map("customer_order_status")
+   132→}
+   133→
+   134→enum OrderLineStatus {
+   135→  OPEN
+   136→  IN_PRODUCTION
+   137→  COMPLETED
+   138→  CANCELLED
+   139→
+   140→  @@map("order_line_status")
+   141→}
+   142→
+   143→enum PlanStatus {
+   144→  DRAFT
+   145→  CONFIRMED
+   146→  RELEASED
+   147→  CLOSED
+   148→  CANCELLED
+   149→
+   150→  @@map("plan_status")
+   151→}
+   152→
+   153→enum MoPriority {
+   154→  LOW
+   155→  NORMAL
+   156→  HIGH
+   157→  URGENT
+   158→
+   159→  @@map("mo_priority")
+   160→}
+   161→
+   162→enum MoStatus {
+   163→  PLANNED
+   164→  RELEASED
+   165→  IN_PROGRESS
+   166→  COMPLETED
+   167→  CLOSED
+   168→  CANCELLED
+   169→
+   170→  @@map("mo_status")
+   171→}
+   172→
+   173→enum OperationStatus {
+   174→  PENDING
+   175→  QUEUED
+   176→  IN_PROGRESS
+   177→  PAUSED
+   178→  COMPLETED
+   179→  CANCELLED
+   180→
+   181→  @@map("operation_status")
+   182→}
+   183→
+   184→enum ReportStatus {
+   185→  DRAFT
+   186→  CONFIRMED
+   187→  CANCELLED
+   188→
+   189→  @@map("report_status")
+   190→}
+   191→
+   192→enum PostingStatus {
+   193→  UNPOSTED
+   194→  POSTED
+   195→  REVERSED
+   196→
+   197→  @@map("posting_status")
+   198→}
+   199→
+   200→enum ScrapReason {
+   201→  MATERIAL_DEFECT
+   202→  DIE_DEFECT
+   203→  MACHINE_FAULT
+   204→  OPERATOR_ERROR
+   205→  QUALITY_REJECT
+   206→  SETUP_WASTE
+   207→  OTHER
+   208→
+   209→  @@map("scrap_reason")
+   210→}
+   211→
+   212→enum TransferStatus {
+   213→  DRAFT
+   214→  CONFIRMED
+   215→  CANCELLED
+   216→
+   217→  @@map("transfer_status")
+   218→}
+   219→
+   220→enum AssignmentStatus {
+   221→  PLANNED
+   222→  ACTIVE
+   223→  COMPLETED
+   224→  CANCELLED
+   225→
+   226→  @@map("assignment_status")
+   227→}
+   228→
+   229→enum InventoryDocType {
+   230→  RECEIPT
+   231→  ISSUE
+   232→  TRANSFER
+   233→  ADJUSTMENT
+   234→  PRODUCTION_RECEIPT
+   235→  PRODUCTION_ISSUE
+   236→  SCRAP_DISPOSAL
+   237→
+   238→  @@map("inventory_doc_type")
+   239→}
+   240→
+   241→enum InventoryDocStatus {
+   242→  DRAFT
+   243→  CONFIRMED
+   244→  CANCELLED
+   245→
+   246→  @@map("inventory_doc_status")
+   247→}
+   248→
+   249→enum InventoryTxType {
+   250→  RECEIPT
+   251→  ISSUE
+   252→  TRANSFER_IN
+   253→  TRANSFER_OUT
+   254→  ADJUSTMENT_IN
+   255→  ADJUSTMENT_OUT
+   256→
+   257→  @@map("inventory_tx_type")
+   258→}
+   259→
+   260→enum ReservationStatus {
+   261→  ACTIVE
+   262→  CONSUMED
+   263→  RELEASED
+   264→  EXPIRED
+   265→
+   266→  @@map("reservation_status")
+   267→}
+   268→
+   269→/// مالکیت موجودی — ورق SAPCO به‌صورت امانی (متعلق به تأمین‌کننده) ردیابی می‌شود
+   270→enum StockOwnership {
+   271→  OWNED
+   272→  SUPPLIER_CONSIGNMENT
+   273→
+   274→  @@map("stock_ownership")
+   275→}
+   276→
+   277→/// وضعیت کیفی موجودی (قرنطینه کیفیت)
+   278→enum QualityStatus {
+   279→  PENDING
+   280→  APPROVED
+   281→  BLOCKED
+   282→
+   283→  @@map("quality_status")
+   284→}
+   285→
+   286→/// علت اصلاحیه انبار — برای هر اصلاحیه الزامی است
+   287→enum AdjustmentReason {
+   288→  OPENING_BALANCE
+   289→  COUNT_CORRECTION
+   290→  DAMAGE
+   291→  LOSS
+   292→  FOUND
+   293→  QUALITY_RELEASE
+   294→  OTHER
+   295→
+   296→  @@map("adjustment_reason")
+   297→}
+   298→
+   299→enum LotStatus {
+   300→  OPEN
+   301→  CLOSED
+   302→  BLOCKED
+   303→
+   304→  @@map("lot_status")
+   305→}
+   306→
+   307→enum ContractStatus {
+   308→  OPEN
+   309→  PARTIALLY_RECEIVED
+   310→  COMPLETED
+   311→  CANCELLED
+   312→
+   313→  @@map("contract_status")
+   314→}
+   315→
+   316→enum SequenceResetPolicy {
+   317→  NEVER
+   318→  YEARLY
+   319→
+   320→  @@map("sequence_reset_policy")
+   321→}
+   322→
+   323→enum SettingValueType {
+   324→  STRING
+   325→  NUMBER
+   326→  BOOLEAN
+   327→  JSON
+   328→
+   329→  @@map("setting_value_type")
+   330→}
+   331→
+   332→// ============================================================================
+   333→// CONTROL DATA — کاربران، نقش‌ها، مجوزها، حسابرسی، تنظیمات
+   334→// ============================================================================
+   335→
+   336→/// کاربر سامانه
+   337→model User {
+   338→  id           String    @id @default(uuid()) @db.Uuid
+   339→  username     String    @unique @db.VarChar(64)
+   340→  email        String?   @unique @db.VarChar(190)
+   341→  fullName     String    @map("full_name") @db.VarChar(190)
+   342→  passwordHash String    @map("password_hash") @db.VarChar(255)
+   343→  isActive     Boolean   @default(true) @map("is_active")
+   344→  roleId       String    @map("role_id") @db.Uuid
+   345→  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(6)
+   346→  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+   347→  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+   348→
+   349→  role                      Role                   @relation(fields: [roleId], references: [id], onDelete: Restrict)
+   350→  auditLogs                 AuditLog[]
+   351→  createdPlans              ProductionPlan[]       @relation("PlanCreatedBy")
+   352→  confirmedPlans            ProductionPlan[]       @relation("PlanConfirmedBy")
+   353→  createdInventoryDocuments InventoryDocument[]    @relation("InvDocCreatedBy")
+   354→  postedInventoryDocuments  InventoryDocument[]    @relation("InvDocPostedBy")
+   355→  createdTransactions       InventoryTransaction[] @relation("InvTxCreatedBy")
+   356→  operatedReports           ProductionReport[]     @relation("ReportOperator")
+   357→
+   358→  @@index([roleId])
+   359→  @@map("users")
+   360→}
+   361→
+   362→/// نقش کاربری
+   363→model Role {
+   364→  id          String   @id @default(uuid()) @db.Uuid
+   365→  name        String   @unique @db.VarChar(64)
+   366→  nameFa      String   @map("name_fa") @db.VarChar(190)
+   367→  description String?  @db.VarChar(500)
+   368→  isActive    Boolean  @default(true) @map("is_active")
+   369→  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+   370→  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+   371→
+   372→  users           User[]
+   373→  rolePermissions RolePermission[]
+   374→
+   375→  @@map("roles")
+   376→}
+   377→
+   378→/// مجوز (ماژول + عملیات)
+   379→model Permission {
+   380→  id          String  @id @default(uuid()) @db.Uuid
+   381→  code        String  @unique @db.VarChar(100) // e.g. "inventory.post"
+   382→  module      String  @db.VarChar(64)
+   383→  action      String  @db.VarChar(64)
+   384→  description String? @db.VarChar(500)
+   385→
+   386→  rolePermissions RolePermission[]
+   387→
+   388→  @@index([module])
+   389→  @@map("permissions")
+   390→}
+   391→
+   392→/// رابط نقش–مجوز
+   393→model RolePermission {
+   394→  roleId       String   @map("role_id") @db.Uuid
+   395→  permissionId String   @map("permission_id") @db.Uuid
+   396→  assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+   397→
+   398→  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+   399→  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+   400→
+   401→  @@id([roleId, permissionId])
+   402→  @@index([permissionId])
+   403→  @@map("role_permissions")
+   404→}
+   405→
+   406→/// لاگ حسابرسی (فقط درج — توسط سرویس‌ها نوشته می‌شود)
+   407→model AuditLog {
+   408→  id         String   @id @default(uuid()) @db.Uuid
+   409→  userId     String?  @map("user_id") @db.Uuid
+   410→  action     String   @db.VarChar(64) // LOGIN, LOGIN_FAILED, LOGOUT, CREATE, UPDATE, POST, REVERSE, ...
+   411→  entityType String?  @map("entity_type") @db.VarChar(64)
+   412→  entityId   String?  @map("entity_id") @db.VarChar(64)
+   413→  changes    Json? // { before: ..., after: ... }
+   414→  ipAddress  String?  @map("ip_address") @db.VarChar(45)
+   415→  userAgent  String?  @map("user_agent") @db.VarChar(500)
+   416→  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+   417→
+   418→  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+   419→
+   420→  @@index([userId])
+   421→  @@index([occurredAt])
+   422→  @@index([entityType, entityId])
+   423→  @@map("audit_logs")
+   424→}
+   425→
+   426→/// دنباله شماره‌گذاری اسناد (شماره سند یکتا)
+   427→model DocumentSequence {
+   428→  id            String              @id @default(uuid()) @db.Uuid
+   429→  key           String              @unique @db.VarChar(32) // INV, MO, PP, CO, PR, TRF
+   430→  title         String?             @db.VarChar(190)
+   431→  prefix        String              @db.VarChar(16)
+   432→  nextNumber    Int                 @default(1) @map("next_number")
+   433→  padLength     Int                 @default(6) @map("pad_length")
+   434→  resetPolicy   SequenceResetPolicy @default(NEVER) @map("reset_policy")
+   435→  lastResetYear Int?                @map("last_reset_year")
+   436→  updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+   437→
+   438→  @@map("document_sequences")
+   439→}
+   440→
+   441→/// تنظیمات سامانه
+   442→model SystemSetting {
+   443→  id          String           @id @default(uuid()) @db.Uuid
+   444→  key         String           @unique @db.VarChar(100)
+   445→  value       String           @db.Text
+   446→  valueType   SettingValueType @default(STRING) @map("value_type")
+   447→  description String?          @db.VarChar(500)
+   448→  isSecret    Boolean          @default(false) @map("is_secret")
+   449→  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+   450→
+   451→  @@map("system_settings")
+   452→}
+   453→
+   454→// ============================================================================
+   455→// MASTER DATA — اطلاعات پایه
+   456→// ============================================================================
+   457→
+   458→/// واحد شمارش
+   459→model UnitOfMeasure {
+   460→  id       String   @id @default(uuid()) @db.Uuid
+   461→  code     String   @unique @db.VarChar(16) // PCS, KG, M, M2, SHEET
+   462→  nameFa   String   @map("name_fa") @db.VarChar(190)
+   463→  nameEn   String   @map("name_en") @db.VarChar(190)
+   464→  kind     UnitKind @default(COUNT)
+   465→  isActive Boolean  @default(true) @map("is_active")
+   466→
+   467→  parts         Part[]
+   468→  materials     Material[]
+   469→  documentLines InventoryDocumentLine[]
+   470→  transactions  InventoryTransaction[]
+   471→  reservations  InventoryReservation[]
+   472→  stockBalances StockBalance[]
+   473→
+   474→  @@map("units_of_measure")
+   475→}
+   476→
+   477→/// ماده اولیه (ورق، رنگ و ...) — تأمین‌کننده اصلی: SAPCO
+   478→model Material {
+   479→  id           String         @id @default(uuid()) @db.Uuid
+   480→  materialCode String         @unique @map("material_code") @db.VarChar(64)
+   481→  nameFa       String         @map("name_fa") @db.VarChar(190)
+   482→  nameEn       String?        @map("name_en") @db.VarChar(190)
+   483→  materialType MaterialType   @default(SHEET) @map("material_type")
+   484→  grade        String?        @db.VarChar(64) // ST12, ST37, ...
+   485→  thicknessMm  Decimal?       @map("thickness_mm") @db.Decimal(10, 3)
+   486→  widthMm      Decimal?       @map("width_mm") @db.Decimal(10, 2)
+   487→  lengthMm     Decimal?       @map("length_mm") @db.Decimal(10, 2)
+   488→  unitWeightKg Decimal?       @map("unit_weight_kg") @db.Decimal(18, 4)
+   489→  baseUnitId   String         @map("base_unit_id") @db.Uuid
+   490→  supplierName String         @default("SAPCO") @map("supplier_name") @db.VarChar(190)
+   491→  status       MaterialStatus @default(ACTIVE)
+   492→  notes        String?        @db.Text
+   493→  createdAt    DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+   494→  updatedAt    DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+   495→
+   496→  baseUnit      UnitOfMeasure           @relation(fields: [baseUnitId], references: [id], onDelete: Restrict)
+   497→  parts         Part[]                  @relation("PartMainMaterial")
+   498→  lots          MaterialLot[]
+   499→  contracts     MaterialContract[]
+   500→  documentLines InventoryDocumentLine[]
+   501→  transactions  InventoryTransaction[]
+   502→  reservations  InventoryReservation[]
+   503→  balances      StockBalance[]
+   504→
+   505→  @@index([materialType])
+   506→  @@index([supplierName])
+   507→  @@map("materials")
+   508→}
+   509→
+   510→/// قطعه (محصول)
+   511→model Part {
+   512→  id                String     @id @default(uuid()) @db.Uuid
+   513→  partNumber        String     @unique @map("part_number") @db.VarChar(64)
+   514→  nameFa            String     @map("name_fa") @db.VarChar(190)
+   515→  nameEn            String?    @map("name_en") @db.VarChar(190)
+   516→  partType          PartType   @default(FINISHED_PART) @map("part_type")
+   517→  status            PartStatus @default(ACTIVE)
+   518→  baseUnitId        String     @map("base_unit_id") @db.Uuid
+   519→  standardWeightKg  Decimal?   @map("standard_weight_kg") @db.Decimal(18, 4)
+   520→  mainMaterialId    String?    @map("main_material_id") @db.Uuid
+   521→  primaryCustomerId String?    @map("primary_customer_id") @db.Uuid
+   522→  description       String?    @db.Text
+   523→  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+   524→  updatedAt         DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+   525→
+   526→  baseUnit            UnitOfMeasure           @relation(fields: [baseUnitId], references: [id], onDelete: Restrict)
+   527→  mainMaterial        Material?               @relation("PartMainMaterial", fields: [mainMaterialId], references: [id], onDelete: SetNull)
+   528→  primaryCustomer     Customer?               @relation(fields: [primaryCustomerId], references: [id], onDelete: SetNull)
+   529→  routes              PartRoute[]
+   530→  orderLines          CustomerOrderLine[]
+   531→  planLines           ProductionPlanLine[]
+   532→  manufacturingOrders ManufacturingOrder[]
+   533→  scraps              ProductionScrap[]
+   534→  transfers           ProductionTransfer[]
+   535→  reservations        InventoryReservation[]
+   536→  transactions        InventoryTransaction[]
+   537→  documentLines       InventoryDocumentLine[]
+   538→  balances            StockBalance[]
+   539→
+   540→  @@index([partType])
+   541→  @@index([status])
+   542→  @@index([mainMaterialId])
+   543→  @@index([primaryCustomerId])
+   544→  @@map("parts")
+   545→}
+   546→
+   547→/// مشتری
+   548→model Customer {
+   549→  id            String   @id @default(uuid()) @db.Uuid
+   550→  code          String   @unique @db.VarChar(32)
+   551→  nameFa        String   @map("name_fa") @db.VarChar(190)
+   552→  nameEn        String?  @map("name_en") @db.VarChar(190)
+   553→  contactPerson String?  @map("contact_person") @db.VarChar(190)
+   554→  phone         String?  @db.VarChar(32)
+   555→  email         String?  @db.VarChar(190)
+   556→  address       String?  @db.Text
+   557→  isActive      Boolean  @default(true) @map("is_active")
+   558→  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+   559→  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+   560→
+   561→  orders CustomerOrder[]
+   562→  parts  Part[]
+   563→
+   564→  @@index([isActive])
+   565→  @@map("customers")
+   566→}
+   567→
+   568→/// عملیات تولید (برش، خالی‌بری، خم، پرس/فرم، جوش پرس، جوش CO2، رنگ، مونتاژ)
+   569→model Operation {
+   570→  id                  String   @id @default(uuid()) @db.Uuid
+   571→  code                String   @unique @db.VarChar(16) // CUT, BLK, BND, FRM, PRW, COW, PNT, ASM
+   572→  nameFa              String   @map("name_fa") @db.VarChar(190)
+   573→  nameEn              String   @map("name_en") @db.VarChar(190)
+   574→  description         String?  @db.Text
+   575→  defaultSetupTimeMin Int?     @map("default_setup_time_min")
+   576→  defaultCycleTimeSec Decimal? @map("default_cycle_time_sec") @db.Decimal(10, 2)
+   577→  isActive            Boolean  @default(true) @map("is_active")
+   578→
+   579→  routeSteps           PartRouteStep[]
+   580→  capabilities         MachineCapability[]
+   581→  productionOperations ProductionOperation[]
+   582→
+   583→  @@map("operations")
+   584→}
+   585→
+   586→/// مسیر تولید قطعه — با نسخه‌بندی (rule 10)
+   587→model PartRoute {
+   588→  id             String      @id @default(uuid()) @db.Uuid
+   589→  partId         String      @map("part_id") @db.Uuid
+   590→  version        Int
+   591→  name           String?     @db.VarChar(190)
+   592→  status         RouteStatus @default(DRAFT)
+   593→  description    String?     @db.Text
+   594→  effectiveFrom  DateTime?   @map("effective_from") @db.Date
+   595→  supersededById String?     @unique @map("superseded_by_id") @db.Uuid
+   596→  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+   597→  updatedAt      DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+   598→
+   599→  part                Part                 @relation(fields: [partId], references: [id], onDelete: Restrict)
+   600→  supersededBy        PartRoute?           @relation("RouteSupersededBy", fields: [supersededById], references: [id], onDelete: SetNull)
+   601→  supersedes          PartRoute?           @relation("RouteSupersededBy")
+   602→  steps               PartRouteStep[]
+   603→  manufacturingOrders ManufacturingOrder[]
+   604→
+   605→  @@unique([partId, version])
+   606→  @@index([partId])
+   607→  @@index([status])
+   608→  @@map("part_routes")
+   609→}
+   610→
+   611→/// مرحله مسیر تولید
+   612→model PartRouteStep {
+   613→  id             String   @id @default(uuid()) @db.Uuid
+   614→  routeId        String   @map("route_id") @db.Uuid
+   615→  sequence       Int
+   616→  operationId    String   @map("operation_id") @db.Uuid
+   617→  machineId      String?  @map("machine_id") @db.Uuid
+   618→  dieId          String?  @map("die_id") @db.Uuid
+   619→  setupTimeMin   Int?     @map("setup_time_min")
+   620→  cycleTimeSec   Decimal? @map("cycle_time_sec") @db.Decimal(10, 2)
+   621→  scrapFactorPct Decimal  @default(0) @map("scrap_factor_pct") @db.Decimal(5, 2)
+   622→  description    String?  @db.Text
+   623→
+   624→  route     PartRoute @relation(fields: [routeId], references: [id], onDelete: Cascade)
+   625→  operation Operation @relation(fields: [operationId], references: [id], onDelete: Restrict)
+   626→  machine   Machine?  @relation(fields: [machineId], references: [id], onDelete: SetNull)
+   627→  die       Die?      @relation(fields: [dieId], references: [id], onDelete: SetNull)
+   628→
+   629→  productionOperations ProductionOperation[]
+   630→
+   631→  @@unique([routeId, sequence])
+   632→  @@index([operationId])
+   633→  @@index([machineId])
+   634→  @@index([dieId])
+   635→  @@map("part_route_steps")
+   636→}
+   637→
+   638→/// ماشین / ایستگاه
+   639→model Machine {
+   640→  id           String        @id @default(uuid()) @db.Uuid
+   641→  code         String        @unique @db.VarChar(32)
+   642→  nameFa       String        @map("name_fa") @db.VarChar(190)
+   643→  nameEn       String?       @map("name_en") @db.VarChar(190)
+   644→  machineType  MachineType   @map("machine_type")
+   645→  tonnage      Decimal?      @db.Decimal(10, 2)
+   646→  manufacturer String?       @db.VarChar(190)
+   647→  location     String?       @db.VarChar(190)
+   648→  status       MachineStatus @default(ACTIVE)
+   649→  notes        String?       @db.Text
+   650→  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+   651→  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+   652→
+   653→  capabilities         MachineCapability[]
+   654→  routeSteps           PartRouteStep[]
+   655→  dieCompatibilities   MachineDieCompatibility[]
+   656→  assignments          MachineAssignment[]
+   657→  productionOperations ProductionOperation[]
+   658→  reports              ProductionReport[]
+   659→
+   660→  @@index([machineType])
+   661→  @@index([status])
+   662→  @@map("machines")
+   663→}
+   664→
+   665→/// توانایی ماشین برای انجام یک عملیات
+   666→model MachineCapability {
+   667→  machineId           String   @map("machine_id") @db.Uuid
+   668→  operationId         String   @map("operation_id") @db.Uuid
+   669→  standardRatePerHour Decimal? @map("standard_rate_per_hour") @db.Decimal(10, 2)
+   670→  notes               String?  @db.VarChar(500)
+   671→
+   672→  machine   Machine   @relation(fields: [machineId], references: [id], onDelete: Cascade)
+   673→  operation Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+   674→
+   675→  @@id([machineId, operationId])
+   676→  @@index([operationId])
+   677→  @@map("machine_capabilities")
+   678→}
+   679→
+   680→/// قالب
+   681→model Die {
+   682→  id              String    @id @default(uuid()) @db.Uuid
+   683→  code            String    @unique @db.VarChar(32)
+   684→  nameFa          String    @map("name_fa") @db.VarChar(190)
+   685→  description     String?   @db.Text
+   686→  status          DieStatus @default(ACTIVE)
+   687→  storageLocation String?   @map("storage_location") @db.VarChar(190)
+   688→  notes           String?   @db.Text
+   689→  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+   690→  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+   691→
+   692→  dieCompatibilities MachineDieCompatibility[]
+   693→  routeSteps         PartRouteStep[]
+   694→  assignments        MachineAssignment[]
+   695→  reports            ProductionReport[]
+   696→
+   697→  @@map("dies")
+   698→}
+   699→
+   700→/// سازگاری قالب با ماشین
+   701→model MachineDieCompatibility {
+   702→  machineId String  @map("machine_id") @db.Uuid
+   703→  dieId     String  @map("die_id") @db.Uuid
+   704→  notes     String? @db.VarChar(500)
+   705→
+   706→  machine Machine @relation(fields: [machineId], references: [id], onDelete: Cascade)
+   707→  die     Die     @relation(fields: [dieId], references: [id], onDelete: Cascade)
+   708→
+   709→  @@id([machineId, dieId])
+   710→  @@index([dieId])
+   711→  @@map("machine_die_compatibility")
+   712→}
+   713→
+   714→/// انبار
+   715→model Warehouse {
+   716→  id            String        @id @default(uuid()) @db.Uuid
+   717→  code          String        @unique @db.VarChar(16)
+   718→  nameFa        String        @map("name_fa") @db.VarChar(190)
+   719→  warehouseType WarehouseType @map("warehouse_type")
+   720→  isActive      Boolean       @default(true) @map("is_active")
+   721→  notes         String?       @db.Text
+   722→  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+   723→  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+   724→
+   725→  locations                   WarehouseLocation[]
+   726→  documents                   InventoryDocument[]
+   727→  transactions                InventoryTransaction[]
+   728→  balances                    StockBalance[]
+   729→  reservations                InventoryReservation[]
+   730→  outgoingProductionTransfers ProductionTransfer[]   @relation("TransferFromWarehouse")
+   731→  incomingProductionTransfers ProductionTransfer[]   @relation("TransferToWarehouse")
+   732→
+   733→  @@map("warehouses")
+   734→}
+   735→
+   736→/// موقعیت مکانی در انبار
+   737→model WarehouseLocation {
+   738→  id          String   @id @default(uuid()) @db.Uuid
+   739→  warehouseId String   @map("warehouse_id") @db.Uuid
+   740→  code        String   @db.VarChar(32)
+   741→  nameFa      String   @map("name_fa") @db.VarChar(190)
+   742→  capacityKg  Decimal? @map("capacity_kg") @db.Decimal(18, 2)
+   743→  isActive    Boolean  @default(true) @map("is_active")
+   744→
+   745→  warehouse         Warehouse               @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+   746→  documentLinesFrom InventoryDocumentLine[] @relation("DocLineFromLocation")
+   747→  documentLinesTo   InventoryDocumentLine[] @relation("DocLineToLocation")
+   748→  transactions      InventoryTransaction[]  @relation("TxLocation")
+   749→  balances          StockBalance[]          @relation("BalanceLocation")
+   750→  operationWip      ProductionOperation[]   @relation("OpWipLocation")
+   751→
+   752→  @@unique([warehouseId, code])
+   753→  @@map("warehouse_locations")
+   754→}
+   755→
+   756→/// شیفت کاری
+   757→model Shift {
+   758→  id        String  @id @default(uuid()) @db.Uuid
+   759→  code      String  @unique @db.VarChar(16)
+   760→  nameFa    String  @map("name_fa") @db.VarChar(190)
+   761→  startTime String  @map("start_time") @db.VarChar(5) // "06:00"
+   762→  endTime   String  @map("end_time") @db.VarChar(5)
+   763→  isActive  Boolean @default(true) @map("is_active")
+   764→
+   765→  reports     ProductionReport[]
+   766→  assignments MachineAssignment[]
+   767→
+   768→  @@map("shifts")
+   769→}
+   770→
+   771→// ============================================================================
+   772→// PRODUCTION DATA — داده‌های تولید
+   773→// ============================================================================
+   774→
+   775→/// سفارش مشتری (سربرگ)
+   776→model CustomerOrder {
+   777→  id          String              @id @default(uuid()) @db.Uuid
+   778→  orderNumber String              @unique @map("order_number") @db.VarChar(32)
+   779→  customerId  String              @map("customer_id") @db.Uuid
+   780→  orderDate   DateTime            @map("order_date") @db.Date
+   781→  dueDate     DateTime?           @map("due_date") @db.Date
+   782→  status      CustomerOrderStatus @default(DRAFT)
+   783→  description String?             @db.Text
+   784→  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+   785→  updatedAt   DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+   786→
+   787→  customer Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+   788→  lines    CustomerOrderLine[]
+   789→
+   790→  @@index([customerId])
+   791→  @@index([status])
+   792→  @@index([orderDate])
+   793→  @@map("customer_orders")
+   794→}
+   795→
+   796→/// ردیف سفارش مشتری
+   797→model CustomerOrderLine {
+   798→  id                String          @id @default(uuid()) @db.Uuid
+   799→  orderId           String          @map("order_id") @db.Uuid
+   800→  lineNo            Int             @map("line_no")
+   801→  partId            String          @map("part_id") @db.Uuid
+   802→  quantity          Decimal         @db.Decimal(18, 4)
+   803→  deliveredQuantity Decimal         @default(0) @map("delivered_quantity") @db.Decimal(18, 4)
+   804→  dueDate           DateTime?       @map("due_date") @db.Date
+   805→  status            OrderLineStatus @default(OPEN)
+   806→  notes             String?         @db.Text
+   807→
+   808→  order        CustomerOrder          @relation(fields: [orderId], references: [id], onDelete: Restrict)
+   809→  part         Part                   @relation(fields: [partId], references: [id], onDelete: Restrict)
+   810→  planLines    ProductionPlanLine[]
+   811→  reservations InventoryReservation[] @relation("ReservationForOrderLine")
+   812→
+   813→  @@unique([orderId, lineNo])
+   814→  @@index([partId])
+   815→  @@map("customer_order_lines")
+   816→}
+   817→
+   818→/// برنامه تولید (سربرگ)
+   819→model ProductionPlan {
+   820→  id            String     @id @default(uuid()) @db.Uuid
+   821→  planNumber    String     @unique @map("plan_number") @db.VarChar(32)
+   822→  title         String     @db.VarChar(190)
+   823→  periodStart   DateTime   @map("period_start") @db.Date
+   824→  periodEnd     DateTime   @map("period_end") @db.Date
+   825→  status        PlanStatus @default(DRAFT)
+   826→  description   String?    @db.Text
+   827→  createdById   String     @map("created_by_id") @db.Uuid
+   828→  confirmedAt   DateTime?  @map("confirmed_at") @db.Timestamptz(6)
+   829→  confirmedById String?    @map("confirmed_by_id") @db.Uuid
+   830→  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+   831→  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+   832→
+   833→  createdBy   User                 @relation("PlanCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+   834→  confirmedBy User?                @relation("PlanConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+   835→  lines       ProductionPlanLine[]
+   836→
+   837→  @@index([status])
+   838→  @@index([periodStart])
+   839→  @@index([createdById])
+   840→  @@map("production_plans")
+   841→}
+   842→
+   843→/// ردیف برنامه تولید
+   844→model ProductionPlanLine {
+   845→  id                  String  @id @default(uuid()) @db.Uuid
+   846→  planId              String  @map("plan_id") @db.Uuid
+   847→  lineNo              Int     @map("line_no")
+   848→  partId              String  @map("part_id") @db.Uuid
+   849→  plannedQuantity     Decimal @map("planned_quantity") @db.Decimal(18, 4)
+   850→  customerOrderLineId String? @map("customer_order_line_id") @db.Uuid
+   851→  notes               String? @db.Text
+   852→
+   853→  plan                ProductionPlan       @relation(fields: [planId], references: [id], onDelete: Cascade)
+   854→  part                Part                 @relation(fields: [partId], references: [id], onDelete: Restrict)
+   855→  customerOrderLine   CustomerOrderLine?   @relation(fields: [customerOrderLineId], references: [id], onDelete: SetNull)
+   856→  manufacturingOrders ManufacturingOrder[]
+   857→
+   858→  @@unique([planId, lineNo])
+   859→  @@index([partId])
+   860→  @@index([customerOrderLineId])
+   861→  @@map("production_plan_lines")
+   862→}
+   863→
+   864→/// دستور کار ساخت
+   865→model ManufacturingOrder {
+   866→  id          String     @id @default(uuid()) @db.Uuid
+   867→  moNumber    String     @unique @map("mo_number") @db.VarChar(32)
+   868→  partId      String     @map("part_id") @db.Uuid
+   869→  routeId     String?    @map("route_id") @db.Uuid
+   870→  planLineId  String?    @map("plan_line_id") @db.Uuid
+   871→  quantity    Decimal    @db.Decimal(18, 4)
+   872→  dueDate     DateTime?  @map("due_date") @db.Date
+   873→  priority    MoPriority @default(NORMAL)
+   874→  status      MoStatus   @default(PLANNED)
+   875→  releasedAt  DateTime?  @map("released_at") @db.Timestamptz(6)
+   876→  completedAt DateTime?  @map("completed_at") @db.Timestamptz(6)
+   877→  notes       String?    @db.Text
+   878→  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+   879→  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+   880→
+   881→  part         Part                   @relation(fields: [partId], references: [id], onDelete: Restrict)
+   882→  route        PartRoute?             @relation(fields: [routeId], references: [id], onDelete: SetNull)
+   883→  planLine     ProductionPlanLine?    @relation(fields: [planLineId], references: [id], onDelete: SetNull)
+   884→  operations   ProductionOperation[]
+   885→  reservations InventoryReservation[] @relation("ReservationForMO")
+   886→
+   887→  @@index([partId])
+   888→  @@index([status])
+   889→  @@index([dueDate])
+   890→  @@index([routeId])
+   891→  @@index([planLineId])
+   892→  @@map("manufacturing_orders")
+   893→}
+   894→
+   895→/// عملیات اجرایی یک دستور کار
+   896→model ProductionOperation {
+   897→  id                     String          @id @default(uuid()) @db.Uuid
+   898→  manufacturingOrderId   String          @map("manufacturing_order_id") @db.Uuid
+   899→  sequence               Int
+   900→  operationId            String          @map("operation_id") @db.Uuid
+   901→  routeStepId            String?         @map("route_step_id") @db.Uuid
+   902→  machineId              String?         @map("machine_id") @db.Uuid
+   903→  status                 OperationStatus @default(PENDING)
+   904→  plannedStart           DateTime?       @map("planned_start") @db.Timestamptz(6)
+   905→  plannedEnd             DateTime?       @map("planned_end") @db.Timestamptz(6)
+   906→  actualStart            DateTime?       @map("actual_start") @db.Timestamptz(6)
+   907→  actualEnd              DateTime?       @map("actual_end") @db.Timestamptz(6)
+   908→  plannedQuantity        Decimal         @map("planned_quantity") @db.Decimal(18, 4)
+   909→  // ---- تجمیع کمیت‌های اجرایی (فاز ۳) — فقط در تراکنش دیتابیس به‌روزرسانی می‌شود ----
+   910→  /// مجموع دریافتی‌شده از عملیات قبل (یا خوراک اولیه)
+   911→  receivedQuantity       Decimal         @default(0) @map("received_quantity") @db.Decimal(18, 4)
+   912→  /// مجموع ورودی تغذیه‌شده به ماشین (شامل تغذیه‌ی مجدد بازکار)
+   913→  inputQuantity          Decimal         @default(0) @map("input_quantity") @db.Decimal(18, 4)
+   914→  producedQuantity       Decimal         @default(0) @map("produced_quantity") @db.Decimal(18, 4)
+   915→  scrappedQuantity       Decimal         @default(0) @map("scrapped_quantity") @db.Decimal(18, 4)
+   916→  /// مردود (غیرقابل بازکاری) — جدا از ضایعات
+   917→  rejectedQuantity       Decimal         @default(0) @map("rejected_quantity") @db.Decimal(18, 4)
+   918→  /// بازکار — برای تغذیه‌ی مجدد در گزارش‌های بعدی
+   919→  reworkQuantity         Decimal         @default(0) @map("rework_quantity") @db.Decimal(18, 4)
+   920→  /// مجموع انتقال‌یافته به عملیات بعد / انبار محصول
+   921→  transferredOutQuantity Decimal         @default(0) @map("transferred_out_quantity") @db.Decimal(18, 4)
+   922→  /// موقعیت فیزیکی WIP این عملیات
+   923→  wipLocationId          String?         @map("wip_location_id") @db.Uuid
+   924→  /// مبنای محاسبه قداره (از لحظه‌ای که WIP این عملیات از صفر بزرگ شد)
+   925→  wipSinceAt             DateTime?       @map("wip_since_at") @db.Timestamptz(6)
+   926→  notes                  String?         @db.Text
+   927→  createdAt              DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+   928→  updatedAt              DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+   929→
+   930→  manufacturingOrder ManufacturingOrder @relation(fields: [manufacturingOrderId], references: [id], onDelete: Restrict)
+   931→  operation          Operation          @relation(fields: [operationId], references: [id], onDelete: Restrict)
+   932→  routeStep          PartRouteStep?     @relation(fields: [routeStepId], references: [id], onDelete: SetNull)
+   933→  machine            Machine?           @relation(fields: [machineId], references: [id], onDelete: SetNull)
+   934→  wipLocation        WarehouseLocation? @relation("OpWipLocation", fields: [wipLocationId], references: [id], onDelete: SetNull)
+   935→
+   936→  reports           ProductionReport[]
+   937→  scraps            ProductionScrap[]
+   938→  assignments       MachineAssignment[]
+   939→  outgoingTransfers ProductionTransfer[] @relation("TransferFromOperation")
+   940→  incomingTransfers ProductionTransfer[] @relation("TransferToOperation")
+   941→
+   942→  @@unique([manufacturingOrderId, sequence])
+   943→  @@index([operationId])
+   944→  @@index([machineId])
+   945→  @@index([status])
+   946→  @@map("production_operations")
+   947→}
+   948→
+   949→/// گزارش تولید (تولید شیفت/روز) — وضعیت سند و وضعیت قطع‌بوش جدا است
+   950→model ProductionReport {
+   951→  id               String        @id @default(uuid()) @db.Uuid
+   952→  reportNumber     String        @unique @map("report_number") @db.VarChar(32)
+   953→  operationId      String        @map("operation_id") @db.Uuid
+   954→  machineId        String?       @map("machine_id") @db.Uuid
+   955→  dieId            String?       @map("die_id") @db.Uuid
+   956→  shiftId          String?       @map("shift_id") @db.Uuid
+   957→  operatorId       String?       @map("operator_id") @db.Uuid
+   958→  reportDate       DateTime      @map("report_date") @db.Date
+   959→  /// ورودی تغذیه‌شده در این گزارش (خوراک ماشین)
+   960→  inputQuantity    Decimal       @default(0) @map("input_quantity") @db.Decimal(18, 4)
+   961→  producedQuantity Decimal       @map("produced_quantity") @db.Decimal(18, 4)
+   962→  /// مردود (غیرقابل بازیابی) — جدا از ضایعات و بازکار
+   963→  rejectedQuantity Decimal       @default(0) @map("rejected_quantity") @db.Decimal(18, 4)
+   964→  reworkQuantity   Decimal       @default(0) @map("rework_quantity") @db.Decimal(18, 4)
+   965→  status           ReportStatus  @default(DRAFT)
+   966→  postingStatus    PostingStatus @default(UNPOSTED) @map("posting_status")
+   967→  postedAt         DateTime?     @map("posted_at") @db.Timestamptz(6)
+   968→  notes            String?       @db.Text
+   969→  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+   970→  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+   971→
+   972→  operation ProductionOperation @relation(fields: [operationId], references: [id], onDelete: Restrict)
+   973→  machine   Machine?            @relation(fields: [machineId], references: [id], onDelete: SetNull)
+   974→  die       Die?                @relation(fields: [dieId], references: [id], onDelete: SetNull)
+   975→  shift     Shift?              @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+   976→  operator  User?               @relation("ReportOperator", fields: [operatorId], references: [id], onDelete: SetNull)
+   977→
+   978→  scraps ProductionScrap[]
+   979→
+   980→  @@index([operationId])
+   981→  @@index([machineId])
+   982→  @@index([reportDate])
+   983→  @@index([postingStatus])
+   984→  @@map("production_reports")
+   985→}
+   986→
+   987→/// ضایعات تولید
+   988→model ProductionScrap {
+   989→  id          String      @id @default(uuid()) @db.Uuid
+   990→  reportId    String?     @map("report_id") @db.Uuid
+   991→  operationId String?     @map("operation_id") @db.Uuid
+   992→  partId      String?     @map("part_id") @db.Uuid
+   993→  reason      ScrapReason
+   994→  quantity    Decimal     @db.Decimal(18, 4)
+   995→  weightKg    Decimal?    @map("weight_kg") @db.Decimal(18, 4)
+   996→  description String?     @db.Text
+   997→  scrapDate   DateTime    @map("scrap_date") @db.Date
+   998→  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+   999→
+  1000→  report    ProductionReport?    @relation(fields: [reportId], references: [id], onDelete: Restrict)
+  1001→  operation ProductionOperation? @relation(fields: [operationId], references: [id], onDelete: Restrict)
+  1002→  part      Part?                @relation(fields: [partId], references: [id], onDelete: Restrict)
+  1003→
+  1004→  @@index([reportId])
+  1005→  @@index([operationId])
+  1006→  @@index([partId])
+  1007→  @@index([scrapDate])
+  1008→  @@map("production_scraps")
+  1009→}
+  1010→
+  1011→/// انتقال بین عملیاتی / بین انبارهای در جریان ساخت
+  1012→model ProductionTransfer {
+  1013→  id              String         @id @default(uuid()) @db.Uuid
+  1014→  transferNumber  String         @unique @map("transfer_number") @db.VarChar(32)
+  1015→  partId          String         @map("part_id") @db.Uuid
+  1016→  fromOperationId String?        @map("from_operation_id") @db.Uuid
+  1017→  toOperationId   String?        @map("to_operation_id") @db.Uuid
+  1018→  fromWarehouseId String?        @map("from_warehouse_id") @db.Uuid
+  1019→  toWarehouseId   String?        @map("to_warehouse_id") @db.Uuid
+  1020→  quantity        Decimal        @db.Decimal(18, 4)
+  1021→  weightKg        Decimal?       @map("weight_kg") @db.Decimal(18, 4)
+  1022→  transferDate    DateTime       @map("transfer_date") @db.Date
+  1023→  status          TransferStatus @default(DRAFT)
+  1024→  postingStatus   PostingStatus  @default(UNPOSTED) @map("posting_status")
+  1025→  notes           String?        @db.Text
+  1026→  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  1027→  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  1028→
+  1029→  part          Part                 @relation(fields: [partId], references: [id], onDelete: Restrict)
+  1030→  fromOperation ProductionOperation? @relation("TransferFromOperation", fields: [fromOperationId], references: [id], onDelete: Restrict)
+  1031→  toOperation   ProductionOperation? @relation("TransferToOperation", fields: [toOperationId], references: [id], onDelete: Restrict)
+  1032→  fromWarehouse Warehouse?           @relation("TransferFromWarehouse", fields: [fromWarehouseId], references: [id], onDelete: Restrict)
+  1033→  toWarehouse   Warehouse?           @relation("TransferToWarehouse", fields: [toWarehouseId], references: [id], onDelete: Restrict)
+  1034→
+  1035→  @@index([partId])
+  1036→  @@index([transferDate])
+  1037→  @@index([postingStatus])
+  1038→  @@map("production_transfers")
+  1039→}
+  1040→
+  1041→/// تخصیص ماشین (و قالب) به عملیات
+  1042→model MachineAssignment {
+  1043→  id           String           @id @default(uuid()) @db.Uuid
+  1044→  operationId  String           @map("operation_id") @db.Uuid
+  1045→  machineId    String           @map("machine_id") @db.Uuid
+  1046→  dieId        String?          @map("die_id") @db.Uuid
+  1047→  shiftId      String?          @map("shift_id") @db.Uuid
+  1048→  plannedStart DateTime         @map("planned_start") @db.Timestamptz(6)
+  1049→  plannedEnd   DateTime?        @map("planned_end") @db.Timestamptz(6)
+  1050→  status       AssignmentStatus @default(PLANNED)
+  1051→  notes        String?          @db.Text
+  1052→  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  1053→  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  1054→
+  1055→  operation ProductionOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  1056→  machine   Machine             @relation(fields: [machineId], references: [id], onDelete: Restrict)
+  1057→  die       Die?                @relation(fields: [dieId], references: [id], onDelete: SetNull)
+  1058→  shift     Shift?              @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  1059→
+  1060→  @@index([operationId])
+  1061→  @@index([machineId])
+  1062→  @@index([status])
+  1063→  @@map("machine_assignments")
+  1064→}
+  1065→
+  1066→// ============================================================================
+  1067→// INVENTORY DATA — داده‌های انبار
+  1068→// ============================================================================
+  1069→
+  1070→/// سند انبار (رسید/حواله/انتقال/اصلاحیه) — وضعیت سند و قطع‌بوش جدا است
+  1071→model InventoryDocument {
+  1072→  id             String             @id @default(uuid()) @db.Uuid
+  1073→  documentNumber String             @unique @map("document_number") @db.VarChar(32)
+  1074→  documentType   InventoryDocType   @map("document_type")
+  1075→  status         InventoryDocStatus @default(DRAFT)
+  1076→  postingStatus  PostingStatus      @default(UNPOSTED) @map("posting_status")
+  1077→  documentDate   DateTime           @map("document_date") @db.Date
+  1078→  warehouseId    String             @map("warehouse_id") @db.Uuid
+  1079→  referenceType  String?            @map("reference_type") @db.VarChar(64) // e.g. PRODUCTION_REPORT, MATERIAL_CONTRACT
+  1080→  referenceId    String?            @map("reference_id") @db.Uuid // polymorphic — no FK by design
+  1081→  description    String?            @db.Text
+  1082→  createdById    String             @map("created_by_id") @db.Uuid
+  1083→  postedById     String?            @map("posted_by_id") @db.Uuid
+  1084→  postedAt       DateTime?          @map("posted_at") @db.Timestamptz(6)
+  1085→  reversalOfId   String?            @map("reversal_of_id") @db.Uuid
+  1086→  /// علت اصلاحیه/افتتاحیه — برای سندهای ADJUSTMENT الزامی است (قاعده ۹ فاز ۲)
+  1087→  reasonCode     AdjustmentReason?  @map("reason_code")
+  1088→  reasonText     String?            @map("reason_text") @db.VarChar(500)
+  1089→  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  1090→  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+  1091→
+  1092→  warehouse            Warehouse                     @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  1093→  createdBy            User                          @relation("InvDocCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  1094→  postedBy             User?                         @relation("InvDocPostedBy", fields: [postedById], references: [id], onDelete: SetNull)
+  1095→  reversalOf           InventoryDocument?            @relation("InvDocReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  1096→  reversals            InventoryDocument[]           @relation("InvDocReversal")
+  1097→  lines                InventoryDocumentLine[]
+  1098→  transactions         InventoryTransaction[]
+  1099→  contractTransactions MaterialContractTransaction[]
+  1100→
+  1101→  @@index([warehouseId])
+  1102→  @@index([documentType])
+  1103→  @@index([status])
+  1104→  @@index([postingStatus])
+  1105→  @@index([documentDate])
+  1106→  @@index([reversalOfId])
+  1107→  @@map("inventory_documents")
+  1108→}
+  1109→
+  1110→/// ردیف سند انبار
+  1111→model InventoryDocumentLine {
+  1112→  id             String          @id @default(uuid()) @db.Uuid
+  1113→  documentId     String          @map("document_id") @db.Uuid
+  1114→  lineNo         Int             @map("line_no")
+  1115→  partId         String?         @map("part_id") @db.Uuid
+  1116→  materialId     String?         @map("material_id") @db.Uuid
+  1117→  lotId          String?         @map("lot_id") @db.Uuid
+  1118→  quantity       Decimal         @db.Decimal(18, 4)
+  1119→  unitId         String          @map("unit_id") @db.Uuid
+  1120→  weightKg       Decimal?        @map("weight_kg") @db.Decimal(18, 4)
+  1121→  fromLocationId String?         @map("from_location_id") @db.Uuid
+  1122→  toLocationId   String?         @map("to_location_id") @db.Uuid
+  1123→  /// برای رسیدهای جدید: شماره لوت برای ساخت لوت هنگام قطع‌بوش
+  1124→  lotNumber      String?         @map("lot_number") @db.VarChar(64)
+  1125→  /// مالکیت/کیفیت مشخص‌شده روی ردیف (پیش‌فرض در زمان قطع‌بوش تعیین می‌شود)
+  1126→  ownership      StockOwnership?
+  1127→  qualityStatus  QualityStatus?  @map("quality_status")
+  1128→  /// قرارداد SAPCO مرتبط با رسید ماده اولیه (دفتر کل قرارداد)
+  1129→  contractId     String?         @map("contract_id") @db.Uuid
+  1130→  /// رزرو مصرف‌شده توسط این ردیف حواله
+  1131→  reservationId  String?         @map("reservation_id") @db.Uuid
+  1132→  notes          String?         @db.Text
+  1133→
+  1134→  document     InventoryDocument     @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  1135→  contract     MaterialContract?     @relation(fields: [contractId], references: [id], onDelete: SetNull)
+  1136→  reservation  InventoryReservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+  1137→  part         Part?                 @relation(fields: [partId], references: [id], onDelete: Restrict)
+  1138→  material     Material?             @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  1139→  lot          MaterialLot?          @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  1140→  unit         UnitOfMeasure         @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  1141→  fromLocation WarehouseLocation?    @relation("DocLineFromLocation", fields: [fromLocationId], references: [id], onDelete: SetNull)
+  1142→  toLocation   WarehouseLocation?    @relation("DocLineToLocation", fields: [toLocationId], references: [id], onDelete: SetNull)
+  1143→
+  1144→  transactions InventoryTransaction[]
+  1145→
+  1146→  @@unique([documentId, lineNo])
+  1147→  @@index([partId])
+  1148→  @@index([materialId])
+  1149→  @@index([lotId])
+  1150→  @@map("inventory_document_lines")
+  1151→}
+  1152→
+  1153→/// تراکنش انبار — دفتر کل تغییرناپذیر (immutable ledger)
+  1154→model InventoryTransaction {
+  1155→  id                String          @id @default(uuid()) @db.Uuid
+  1156→  transactionNumber String          @unique @map("transaction_number") @db.VarChar(32)
+  1157→  documentId        String?         @map("document_id") @db.Uuid
+  1158→  documentLineId    String?         @map("document_line_id") @db.Uuid
+  1159→  type              InventoryTxType
+  1160→  partId            String?         @map("part_id") @db.Uuid
+  1161→  materialId        String?         @map("material_id") @db.Uuid
+  1162→  warehouseId       String          @map("warehouse_id") @db.Uuid
+  1163→  locationId        String?         @map("location_id") @db.Uuid
+  1164→  lotId             String?         @map("lot_id") @db.Uuid
+  1165→  quantity          Decimal         @db.Decimal(18, 4)
+  1166→  unitId            String          @map("unit_id") @db.Uuid
+  1167→  weightKg          Decimal?        @map("weight_kg") @db.Decimal(18, 4)
+  1168→  occurredAt        DateTime        @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  1169→  /// مالکیت و وضعیت کیفی — بخشی از کلید موجودی (جداسازی ورق امانی SAPCO و قرنطینه کیفیت)
+  1170→  ownership         StockOwnership  @default(OWNED)
+  1171→  qualityStatus     QualityStatus   @default(APPROVED) @map("quality_status")
+  1172→  reversalOfId      String?         @map("reversal_of_id") @db.Uuid
+  1173→  createdById       String?         @map("created_by_id") @db.Uuid
+  1174→  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  1175→
+  1176→  document     InventoryDocument?     @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  1177→  documentLine InventoryDocumentLine? @relation(fields: [documentLineId], references: [id], onDelete: Restrict)
+  1178→  part         Part?                  @relation(fields: [partId], references: [id], onDelete: Restrict)
+  1179→  material     Material?              @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  1180→  warehouse    Warehouse              @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  1181→  location     WarehouseLocation?     @relation("TxLocation", fields: [locationId], references: [id], onDelete: Restrict)
+  1182→  lot          MaterialLot?           @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  1183→  unit         UnitOfMeasure          @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  1184→  createdBy    User?                  @relation("InvTxCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  1185→  reversalOf   InventoryTransaction?  @relation("InvTxReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  1186→  reversals    InventoryTransaction[] @relation("InvTxReversal")
+  1187→
+  1188→  @@index([documentId])
+  1189→  @@index([documentLineId])
+  1190→  @@index([partId])
+  1191→  @@index([materialId])
+  1192→  @@index([warehouseId])
+  1193→  @@index([locationId])
+  1194→  @@index([lotId])
+  1195→  @@index([occurredAt])
+  1196→  @@index([type])
+  1197→  @@index([ownership])
+  1198→  @@index([qualityStatus])
+  1199→  @@map("inventory_transactions")
+  1200→}
+  1201→
+  1202→/// رزرو موجودی برای سفارش/دستور کار
+  1203→model InventoryReservation {
+  1204→  id                      String            @id @default(uuid()) @db.Uuid
+  1205→  partId                  String?           @map("part_id") @db.Uuid
+  1206→  materialId              String?           @map("material_id") @db.Uuid
+  1207→  warehouseId             String?           @map("warehouse_id") @db.Uuid
+  1208→  quantity                Decimal           @db.Decimal(18, 4)
+  1209→  unitId                  String            @map("unit_id") @db.Uuid
+  1210→  forManufacturingOrderId String?           @map("for_manufacturing_order_id") @db.Uuid
+  1211→  forCustomerOrderLineId  String?           @map("for_customer_order_line_id") @db.Uuid
+  1212→  status                  ReservationStatus @default(ACTIVE)
+  1213→  expiresAt               DateTime?         @map("expires_at") @db.Timestamptz(6)
+  1214→  notes                   String?           @db.Text
+  1215→  createdAt               DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  1216→  updatedAt               DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  1217→
+  1218→  part                  Part?                   @relation(fields: [partId], references: [id], onDelete: Restrict)
+  1219→  material              Material?               @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  1220→  warehouse             Warehouse?              @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  1221→  unit                  UnitOfMeasure           @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  1222→  documentLines         InventoryDocumentLine[]
+  1223→  forManufacturingOrder ManufacturingOrder?     @relation("ReservationForMO", fields: [forManufacturingOrderId], references: [id], onDelete: SetNull)
+  1224→  forCustomerOrderLine  CustomerOrderLine?      @relation("ReservationForOrderLine", fields: [forCustomerOrderLineId], references: [id], onDelete: SetNull)
+  1225→
+  1226→  @@index([partId])
+  1227→  @@index([materialId])
+  1228→  @@index([warehouseId])
+  1229→  @@index([status])
+  1230→  @@index([forManufacturingOrderId])
+  1231→  @@index([forCustomerOrderLineId])
+  1232→  @@map("inventory_reservations")
+  1233→}
+  1234→
+  1235→/// موجودی رسمی انبار — فقط سمت سرور و در همان تراکنش دیتابیسِ ثبت، به‌روزرسانی می‌شود
+  1236→model StockBalance {
+  1237→  id                String         @id @default(uuid()) @db.Uuid
+  1238→  partId            String?        @map("part_id") @db.Uuid
+  1239→  materialId        String?        @map("material_id") @db.Uuid
+  1240→  warehouseId       String         @map("warehouse_id") @db.Uuid
+  1241→  locationId        String?        @map("location_id") @db.Uuid
+  1242→  lotId             String?        @map("lot_id") @db.Uuid
+  1243→  /// واحد شمارش این موجودی (عدد یا کیلوگرم — سطرها به‌تفکیک واحد)
+  1244→  unitId            String         @map("unit_id") @db.Uuid
+  1245→  ownership         StockOwnership @default(OWNED)
+  1246→  qualityStatus     QualityStatus  @default(APPROVED) @map("quality_status")
+  1247→  /// کلید قطعی برای upsert اتمی (dimها می‌توانند NULL باشند؛ ترکیب NULL در Postgres یکتا نیست)
+  1248→  balanceKey        String         @unique @map("balance_key") @db.VarChar(220)
+  1249→  quantity          Decimal        @default(0) @db.Decimal(18, 4)
+  1250→  weightKg          Decimal        @default(0) @map("weight_kg") @db.Decimal(18, 4)
+  1251→  lastTransactionAt DateTime?      @map("last_transaction_at") @db.Timestamptz(6)
+  1252→  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  1253→
+  1254→  part      Part?              @relation(fields: [partId], references: [id], onDelete: Restrict)
+  1255→  material  Material?          @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  1256→  warehouse Warehouse          @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  1257→  location  WarehouseLocation? @relation("BalanceLocation", fields: [locationId], references: [id], onDelete: Restrict)
+  1258→  lot       MaterialLot?       @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  1259→  unit      UnitOfMeasure      @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  1260→
+  1261→  @@index([warehouseId])
+  1262→  @@index([partId])
+  1263→  @@index([materialId])
+  1264→  @@index([locationId])
+  1265→  @@index([lotId])
+  1266→  @@index([ownership])
+  1267→  @@index([qualityStatus])
+  1268→  @@map("stock_balances")
+  1269→}
+  1270→
+  1271→/// بچ/لوت ماده اولیه (ردیابی ورق‌های دریافتی از SAPCO)
+  1272→model MaterialLot {
+  1273→  id                String         @id @default(uuid()) @db.Uuid
+  1274→  materialId        String         @map("material_id") @db.Uuid
+  1275→  lotNumber         String         @map("lot_number") @db.VarChar(64)
+  1276→  receiptDate       DateTime       @map("receipt_date") @db.Date
+  1277→  quantityReceived  Decimal        @map("quantity_received") @db.Decimal(18, 4)
+  1278→  quantityRemaining Decimal        @map("quantity_remaining") @db.Decimal(18, 4)
+  1279→  weightReceivedKg  Decimal        @map("weight_received_kg") @db.Decimal(18, 4)
+  1280→  weightRemainingKg Decimal        @map("weight_remaining_kg") @db.Decimal(18, 4)
+  1281→  /// ورق امانی SAPCO در سطح لوت علامت‌گذاری می‌شود
+  1282→  ownership         StockOwnership @default(OWNED)
+  1283→  status            LotStatus      @default(OPEN)
+  1284→  certificateNumber String?        @map("certificate_number") @db.VarChar(190)
+  1285→  supplierLotNumber String?        @map("supplier_lot_number") @db.VarChar(190)
+  1286→  notes             String?        @db.Text
+  1287→  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  1288→  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  1289→
+  1290→  material             Material                      @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  1291→  transactions         InventoryTransaction[]
+  1292→  documentLines        InventoryDocumentLine[]
+  1293→  balances             StockBalance[]
+  1294→  contractTransactions MaterialContractTransaction[]
+  1295→
+  1296→  @@unique([materialId, lotNumber])
+  1297→  @@index([status])
+  1298→  @@index([receiptDate])
+  1299→  @@map("material_lots")
+  1300→}
+  1301→
+  1302→/// قرارداد خرید ماده اولیه (SAPCO)
+  1303→model MaterialContract {
+  1304→  id                   String         @id @default(uuid()) @db.Uuid
+  1305→  contractNumber       String         @unique @map("contract_number") @db.VarChar(32)
+  1306→  supplierName         String         @default("SAPCO") @map("supplier_name") @db.VarChar(190)
+  1307→  materialId           String         @map("material_id") @db.Uuid
+  1308→  orderDate            DateTime       @map("order_date") @db.Date
+  1309→  expectedDeliveryDate DateTime?      @map("expected_delivery_date") @db.Date
+  1310→  totalQuantity        Decimal        @map("total_quantity") @db.Decimal(18, 4)
+  1311→  totalWeightKg        Decimal?       @map("total_weight_kg") @db.Decimal(18, 4)
+  1312→  status               ContractStatus @default(OPEN)
+  1313→  description          String?        @db.Text
+  1314→  createdAt            DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  1315→  updatedAt            DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  1316→
+  1317→  material      Material                      @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  1318→  documentLines InventoryDocumentLine[]
+  1319→  transactions  MaterialContractTransaction[]
+  1320→
+  1321→  @@index([materialId])
+  1322→  @@index([status])
+  1323→  @@index([orderDate])
+  1324→  @@map("material_contracts")
+  1325→}
+  1326→
+  1327→/// تراکنش قرارداد (دریافت‌های انجام‌شده)
+  1328→model MaterialContractTransaction {
+  1329→  id                  String   @id @default(uuid()) @db.Uuid
+  1330→  contractId          String   @map("contract_id") @db.Uuid
+  1331→  receivedDate        DateTime @map("received_date") @db.Date
+  1332→  quantity            Decimal  @db.Decimal(18, 4)
+  1333→  weightKg            Decimal? @map("weight_kg") @db.Decimal(18, 4)
+  1334→  lotId               String?  @map("lot_id") @db.Uuid
+  1335→  inventoryDocumentId String?  @map("inventory_document_id") @db.Uuid
+  1336→  notes               String?  @db.Text
+  1337→  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  1338→
+  1339→  contract          MaterialContract   @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  1340→  lot               MaterialLot?       @relation(fields: [lotId], references: [id], onDelete: SetNull)
+  1341→  inventoryDocument InventoryDocument? @relation(fields: [inventoryDocumentId], references: [id], onDelete: SetNull)
+  1342→
+  1343→  @@index([contractId])
+  1344→  @@index([receivedDate])
+  1345→  @@index([lotId])
+  1346→  @@map("material_contract_transactions")
+  1347→}
+  1348→

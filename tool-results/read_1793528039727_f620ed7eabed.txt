@@ -1,0 +1,1026 @@
+     1→import { Prisma, type OperationStatus } from '@prisma/client';
+     2→import { db } from '../../config/db';
+     3→import { ApiError } from '../../lib/http';
+     4→import { recordAudit } from '../../lib/audit';
+     5→import { generateDocumentNumber } from '../../services/documentNumber.service';
+     6→import {
+     7→  createMoSchema,
+     8→  createReportSchema,
+     9→  createTransferSchema,
+    10→} from './production.schemas';
+    11→
+    12→const D = Prisma.Decimal;
+    13→type Tx = Prisma.TransactionClient;
+    14→type Dec = Prisma.Decimal;
+    15→
+    16→const Q = (v: Prisma.Decimal | string | number | null | undefined): Dec => new D(v ?? 0);
+    17→
+    18→// ---------------------------------------------------------------------------
+    19→// Manufacturing orders
+    20→// ---------------------------------------------------------------------------
+    21→
+    22→/**
+    23→ * Create an MO and generate its production operations from the approved
+    24→ * (ACTIVE) part route. Planned quantity per step accounts for the scrap
+    25→ * factor of all downstream steps:  qty_i = Q / Π_{j>=i} (1 − sf_j).
+    26→ */
+    27→export async function createManufacturingOrder(input: unknown, userId: string, meta: { ip?: string; ua?: string }) {
+    28→  const parsed = createMoSchema.parse(input);
+    29→  const qty = new D(parsed.quantity);
+    30→  if (!qty.isPositive()) {
+    31→    throw new ApiError(422, 'quantity must be positive', 'مقدار باید مثبت باشد', 'bad_quantity');
+    32→  }
+    33→
+    34→  return db.$transaction(async (tx) => {
+    35→    const part = await tx.part.findUnique({ where: { id: parsed.partId } });
+    36→    if (!part) throw new ApiError(404, 'Part not found', 'قطعه یافت نشد', 'part_not_found');
+    37→    if (part.status !== 'ACTIVE') {
+    38→      throw new ApiError(422, 'Part is not active', 'قطعه فعال نیست', 'part_inactive');
+    39→    }
+    40→
+    41→    const route = parsed.routeId
+    42→      ? await tx.partRoute.findUnique({ where: { id: parsed.routeId }, include: { steps: { orderBy: { sequence: 'asc' } } } })
+    43→      : await tx.partRoute.findFirst({
+    44→          where: { partId: part.id, status: 'ACTIVE' },
+    45→          orderBy: { version: 'desc' },
+    46→          include: { steps: { orderBy: { sequence: 'asc' } } },
+    47→        });
+    48→
+    49→    if (!route) {
+    50→      throw new ApiError(
+    51→        422,
+    52→        parsed.routeId
+    53→          ? 'Route not found'
+    54→          : 'Part has no ACTIVE route version — approve a route first',
+    55→        parsed.routeId ? 'مسیر تولید یافت نشد' : 'برای این قطعه مسیر تولید تأییدشده (ACTIVE) وجود ندارد',
+    56→        'route_not_found',
+    57→      );
+    58→    }
+    59→    if (route.partId !== part.id) {
+    60→      throw new ApiError(422, 'Route belongs to a different part', 'مسیر تولید متعلق به قطعه دیگری است', 'route_part_mismatch');
+    61→    }
+    62→    if (route.status !== 'ACTIVE') {
+    63→      throw new ApiError(422, 'Route version is not ACTIVE', 'نسخه مسیر تولید تأیید نشده است', 'route_not_active');
+    64→    }
+    65→    if (route.steps.length === 0) {
+    66→      throw new ApiError(422, 'Route has no steps', 'مسیر تولید مرحله‌ای ندارد', 'route_empty');
+    67→    }
+    68→
+    69→    const moNumber = await generateDocumentNumber(tx, 'MO');
+    70→
+    71→    // planned quantity per step (backward with scrap factors)
+    72→    const steps = route.steps;
+    73→    const planned: Dec[] = new Array<Dec>(steps.length);
+    74→    let acc = qty;
+    75→    for (let i = steps.length - 1; i >= 0; i--) {
+    76→      const step = steps[i]!;
+    77→      planned[i] = acc;
+    78→      const sf = Q(step.scrapFactorPct).div(100);
+    79→      acc = acc.div(new D(1).minus(sf));
+    80→    }
+    81→
+    82→    const mo = await tx.manufacturingOrder.create({
+    83→      data: {
+    84→        moNumber,
+    85→        partId: part.id,
+    86→        routeId: route.id,
+    87→        planLineId: parsed.planLineId ?? null,
+    88→        quantity: qty,
+    89→        dueDate: parsed.dueDate ? new Date(`${parsed.dueDate}T00:00:00Z`) : null,
+    90→        priority: parsed.priority,
+    91→        status: 'PLANNED',
+    92→        notes: parsed.notes ?? null,
+    93→        operations: {
+    94→          create: steps.map((step, i) => ({
+    95→            sequence: step.sequence,
+    96→            operationId: step.operationId,
+    97→            routeStepId: step.id,
+    98→            machineId: step.machineId,
+    99→            status: 'PENDING' as OperationStatus,
+   100→            plannedQuantity: planned[i]!,
+   101→          })),
+   102→        },
+   103→      },
+   104→      include: { operations: { orderBy: { sequence: 'asc' }, include: { operation: true } } },
+   105→    });
+   106→
+   107→    await recordAudit(tx, {
+   108→      userId,
+   109→      action: 'CREATE',
+   110→      entityType: 'ManufacturingOrder',
+   111→      entityId: mo.id,
+   112→      changes: { moNumber, partNumber: part.partNumber, quantity: qty.toFixed(4), routeVersion: route.version },
+   113→      ipAddress: meta.ip,
+   114→      userAgent: meta.ua,
+   115→    });
+   116→
+   117→    return mo;
+   118→  });
+   119→}
+   120→
+   121→export async function listManufacturingOrders(filters: { status?: string; partId?: string; take?: number }) {
+   122→  const mos = await db.manufacturingOrder.findMany({
+   123→    where: { status: filters.status as never, partId: filters.partId },
+   124→    orderBy: { createdAt: 'desc' },
+   125→    take: filters.take ?? 100,
+   126→    include: {
+   127→      part: { select: { partNumber: true, nameFa: true, baseUnit: { select: { code: true } } } },
+   128→      route: { select: { version: true, status: true, name: true } },
+   129→      operations: {
+   130→        orderBy: { sequence: 'asc' },
+   131→        include: { operation: { select: { code: true, nameFa: true } } },
+   132→      },
+   133→    },
+   134→  });
+   135→  // roll up progress: produced at the last operation vs MO quantity
+   136→  return mos.map((mo) => {
+   137→    const ops = mo.operations;
+   138→    const finalOp = ops[ops.length - 1];
+   139→    const producedFinal = finalOp ? Q(finalOp.producedQuantity) : new D(0);
+   140→    const wipTotal = ops.reduce(
+   141→      (acc, op) =>
+   142→        acc
+   143→          .plus(Q(op.receivedQuantity))
+   144→          .minus(Q(op.transferredOutQuantity))
+   145→          .minus(Q(op.scrappedQuantity))
+   146→          .minus(Q(op.rejectedQuantity)),
+   147→      new D(0),
+   148→    );
+   149→    return {
+   150→      id: mo.id,
+   151→      moNumber: mo.moNumber,
+   152→      part: mo.part,
+   153→      route: mo.route,
+   154→      quantity: Q(mo.quantity).toFixed(4),
+   155→      dueDate: mo.dueDate,
+   156→      priority: mo.priority,
+   157→      status: mo.status,
+   158→      releasedAt: mo.releasedAt,
+   159→      completedAt: mo.completedAt,
+   160→      notes: mo.notes,
+   161→      createdAt: mo.createdAt,
+   162→      progressPercent: Q(mo.quantity).comparedTo(0) === 0 ? 0 : producedFinal.div(Q(mo.quantity)).mul(100).toNumber(),
+   163→      producedFinal: producedFinal.toFixed(4),
+   164→      wipTotal: wipTotal.toFixed(4),
+   165→      operations: ops.map((op) => ({
+   166→        id: op.id,
+   167→        sequence: op.sequence,
+   168→        operation: op.operation,
+   169→        status: op.status,
+   170→        plannedQuantity: Q(op.plannedQuantity).toFixed(4),
+   171→        producedQuantity: Q(op.producedQuantity).toFixed(4),
+   172→      })),
+   173→    };
+   174→  });
+   175→}
+   176→
+   177→export async function getManufacturingOrder(id: string) {
+   178→  const mo = await db.manufacturingOrder.findUnique({
+   179→    where: { id },
+   180→    include: {
+   181→      part: { select: { partNumber: true, nameFa: true, baseUnit: { select: { code: true } }, standardWeightKg: true } },
+   182→      route: { include: { steps: { orderBy: { sequence: 'asc' }, include: { operation: true, machine: true } } } },
+   183→      operations: {
+   184→        orderBy: { sequence: 'asc' },
+   185→        include: {
+   186→          operation: true,
+   187→          machine: true,
+   188→          reports: { orderBy: { createdAt: 'desc' } },
+   189→          outgoingTransfers: { include: { part: true } },
+   190→          incomingTransfers: true,
+   191→        },
+   192→      },
+   193→    },
+   194→  });
+   195→  if (!mo) throw new ApiError(404, 'Manufacturing order not found', 'دستور کار یافت نشد', 'mo_not_found');
+   196→  return mo;
+   197→}
+   198→
+   199→async function loadMoWithOps(tx: Tx, id: string) {
+   200→  const mo = await tx.manufacturingOrder.findUnique({
+   201→    where: { id },
+   202→    include: { operations: { orderBy: { sequence: 'asc' } }, part: true },
+   203→  });
+   204→  if (!mo) throw new ApiError(404, 'Manufacturing order not found', 'دستور کار یافت نشد', 'mo_not_found');
+   205→  return mo;
+   206→}
+   207→
+   208→export async function releaseManufacturingOrder(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   209→  return db.$transaction(async (tx) => {
+   210→    const mo = await loadMoWithOps(tx, id);
+   211→    if (mo.status !== 'PLANNED') {
+   212→      throw new ApiError(409, 'Only PLANNED orders can be released', 'فقط دستور کارهای در وضعیت برنامه‌ریزی قابل آزادسازی هستند', 'mo_status');
+   213→    }
+   214→    const updated = await tx.manufacturingOrder.update({
+   215→      where: { id },
+   216→      data: { status: 'RELEASED', releasedAt: new Date() },
+   217→    });
+   218→    await tx.productionOperation.updateMany({ where: { manufacturingOrderId: id, status: 'PENDING' }, data: { status: 'QUEUED' } });
+   219→    await recordAudit(tx, { userId, action: 'RELEASE', entityType: 'ManufacturingOrder', entityId: id, ipAddress: meta.ip, userAgent: meta.ua });
+   220→    return updated;
+   221→  });
+   222→}
+   223→
+   224→export async function cancelManufacturingOrder(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   225→  return db.$transaction(async (tx) => {
+   226→    const mo = await loadMoWithOps(tx, id);
+   227→    if (['COMPLETED', 'CLOSED', 'CANCELLED'].includes(mo.status)) {
+   228→      throw new ApiError(409, 'Order already finished', 'دستور کار قبلاً بسته شده است', 'mo_status');
+   229→    }
+   230→    const [reports, transfers] = await Promise.all([
+   231→      tx.productionReport.count({ where: { operation: { manufacturingOrderId: id }, postingStatus: 'POSTED' } }),
+   232→      tx.productionTransfer.count({ where: { partId: mo.partId, fromOperationId: { in: mo.operations.map((o) => o.id) }, postingStatus: 'POSTED' } }),
+   233→    ]);
+   234→    if (reports > 0 || transfers > 0) {
+   235→      throw new ApiError(409, 'Order has posted activity and cannot be cancelled', 'دستور کار دارای فعالیت قطع‌بوش‌شده است و قابل ابطال نیست', 'mo_has_activity');
+   236→    }
+   237→    const updated = await tx.manufacturingOrder.update({ where: { id }, data: { status: 'CANCELLED' } });
+   238→    await tx.productionOperation.updateMany({ where: { manufacturingOrderId: id }, data: { status: 'CANCELLED' } });
+   239→    await recordAudit(tx, { userId, action: 'CANCEL', entityType: 'ManufacturingOrder', entityId: id, ipAddress: meta.ip, userAgent: meta.ua });
+   240→    return updated;
+   241→  });
+   242→}
+   243→
+   244→export async function completeManufacturingOrder(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   245→  return db.$transaction(async (tx) => {
+   246→    const mo = await loadMoWithOps(tx, id);
+   247→    if (!['IN_PROGRESS', 'RELEASED'].includes(mo.status)) {
+   248→      throw new ApiError(409, 'Order is not active', 'دستور کار در جریان نیست', 'mo_status');
+   249→    }
+   250→    const ops = mo.operations;
+   251→    const finalOp = ops[ops.length - 1];
+   252→    if (!finalOp) throw new ApiError(422, 'Order has no operations', 'دستور کار عملیاتی ندارد', 'mo_no_ops');
+   253→    if (Q(finalOp.producedQuantity).comparedTo(Q(mo.quantity)) < 0) {
+   254→      throw new ApiError(
+   255→        422,
+   256→        `Final operation produced ${Q(finalOp.producedQuantity).toFixed(0)} of ${Q(mo.quantity).toFixed(0)}`,
+   257→        'تولید عملیات آخر هنوز به مقدار دستور کار نرسیده است',
+   258→        'mo_not_complete',
+   259→      );
+   260→    }
+   261→    const updated = await tx.manufacturingOrder.update({
+   262→      where: { id },
+   263→      data: { status: 'COMPLETED', completedAt: new Date() },
+   264→    });
+   265→    await tx.productionOperation.updateMany({
+   266→      where: { manufacturingOrderId: id, status: { in: ['PENDING', 'QUEUED', 'IN_PROGRESS', 'PAUSED'] } },
+   267→      data: { status: 'COMPLETED' },
+   268→    });
+   269→    await recordAudit(tx, { userId, action: 'COMPLETE', entityType: 'ManufacturingOrder', entityId: id, ipAddress: meta.ip, userAgent: meta.ua });
+   270→    return updated;
+   271→  });
+   272→}
+   273→
+   274→// ---------------------------------------------------------------------------
+   275→// Production reports (input / produced / scrap / rejected / rework)
+   276→// ---------------------------------------------------------------------------
+   277→
+   278→export async function createProductionReport(input: unknown, userId: string, meta: { ip?: string; ua?: string }) {
+   279→  const parsed = createReportSchema.parse(input);
+   280→  const input_ = new D(parsed.inputQuantity);
+   281→  const produced = new D(parsed.producedQuantity);
+   282→  const rejected = new D(parsed.rejectedQuantity);
+   283→  const rework = new D(parsed.reworkQuantity);
+   284→  const scrapTotal = parsed.scraps.reduce((acc, s) => acc.plus(new D(s.quantity)), new D(0));
+   285→
+   286→  for (const [name, v] of [['input', input_], ['produced', produced], ['rejected', rejected], ['rework', rework]] as const) {
+   287→    if (v.isNegative()) {
+   288→      throw new ApiError(422, `${name} quantity cannot be negative`, `مقدار ${name} نمی‌تواند منفی باشد`, 'bad_quantity');
+   289→    }
+   290→  }
+   291→  for (const s of parsed.scraps) {
+   292→    if (s.weightKg != null && new D(s.weightKg).isNegative()) {
+   293→      throw new ApiError(422, 'scrap weight cannot be negative', 'وزن ضایعات نمی‌تواند منفی باشد', 'bad_quantity');
+   294→    }
+   295→  }
+   296→
+   297→  // conservation of processing: input = produced + rejected + rework + scrap
+   298→  const outputSum = produced.plus(rejected).plus(rework).plus(scrapTotal);
+   299→  if (!outputSum.equals(input_)) {
+   300→    throw new ApiError(
+   301→      422,
+   302→      `Conservation violated: input ${input_.toFixed(4)} ≠ produced + rejected + rework + scrap = ${outputSum.toFixed(4)}`,
+   303→      'جمع خروجی‌ها (تولید + مردود + بازکار + ضایعات) باید برابر ورودی باشد',
+   304→      'report_not_balanced',
+   305→      { input: input_.toFixed(4), output: outputSum.toFixed(4) },
+   306→    );
+   307→  }
+   308→
+   309→  return db.$transaction(async (tx) => {
+   310→    const op = await tx.productionOperation.findUnique({
+   311→      where: { id: parsed.operationId },
+   312→      include: { manufacturingOrder: true, operation: true },
+   313→    });
+   314→    if (!op) throw new ApiError(404, 'Operation not found', 'عملیات یافت نشد', 'operation_not_found');
+   315→    if (!['RELEASED', 'IN_PROGRESS'].includes(op.manufacturingOrder.status)) {
+   316→      throw new ApiError(409, 'Manufacturing order is not active', 'دستور کار فعال نیست', 'mo_not_active');
+   317→    }
+   318→    if (parsed.machineId) {
+   319→      const machine = await tx.machine.findUnique({ where: { id: parsed.machineId } });
+   320→      if (!machine) throw new ApiError(404, 'Machine not found', 'ماشین یافت نشد', 'machine_not_found');
+   321→    }
+   322→    if (parsed.shiftId) {
+   323→      const shift = await tx.shift.findUnique({ where: { id: parsed.shiftId } });
+   324→      if (!shift) throw new ApiError(404, 'Shift not found', 'شیفت یافت نشد', 'shift_not_found');
+   325→    }
+   326→
+   327→    const reportNumber = await generateDocumentNumber(tx, 'PR');
+   328→    const report = await tx.productionReport.create({
+   329→      data: {
+   330→        reportNumber,
+   331→        operationId: op.id,
+   332→        machineId: parsed.machineId ?? null,
+   333→        dieId: parsed.dieId ?? null,
+   334→        shiftId: parsed.shiftId ?? null,
+   335→        reportDate: new Date(`${parsed.reportDate}T00:00:00Z`),
+   336→        inputQuantity: input_,
+   337→        producedQuantity: produced,
+   338→        rejectedQuantity: rejected,
+   339→        reworkQuantity: rework,
+   340→        status: 'DRAFT',
+   341→        postingStatus: 'UNPOSTED',
+   342→        notes: parsed.notes ?? null,
+   343→        scraps: {
+   344→          create: parsed.scraps.map((s) => ({
+   345→            operationId: op.id,
+   346→            partId: op.manufacturingOrder.partId,
+   347→            reason: s.reason,
+   348→            quantity: new D(s.quantity),
+   349→            weightKg: s.weightKg != null ? new D(s.weightKg) : null,
+   350→            description: s.description ?? null,
+   351→            scrapDate: new Date(`${parsed.reportDate}T00:00:00Z`),
+   352→          })),
+   353→        },
+   354→      },
+   355→      include: { scraps: true, operation: { include: { operation: true } } },
+   356→    });
+   357→
+   358→    await recordAudit(tx, {
+   359→      userId,
+   360→      action: 'CREATE',
+   361→      entityType: 'ProductionReport',
+   362→      entityId: report.id,
+   363→      changes: { reportNumber, operationId: op.id, input: input_.toFixed(4), produced: produced.toFixed(4) },
+   364→      ipAddress: meta.ip,
+   365→      userAgent: meta.ua,
+   366→    });
+   367→
+   368→    return report;
+   369→  });
+   370→}
+   371→
+   372→/**
+   373→ * Confirm (post) a production report: updates operation aggregates and the
+   374→ * MO state atomically. Quantities NEVER leave the operation here — only the
+   375→ * explicit transfer documents move quantity between operations.
+   376→ */
+   377→export async function confirmProductionReport(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   378→  return db.$transaction(
+   379→    async (tx) => {
+   380→      const report = await tx.productionReport.findUnique({
+   381→        where: { id },
+   382→        include: { scraps: true, operation: { include: { manufacturingOrder: true } } },
+   383→      });
+   384→      if (!report) throw new ApiError(404, 'Report not found', 'گزارش یافت نشد', 'report_not_found');
+   385→      if (report.status === 'CANCELLED') {
+   386→        throw new ApiError(409, 'Cancelled reports cannot be confirmed', 'گزارش ابطال‌شده قابل تأیید نیست', 'report_cancelled');
+   387→      }
+   388→
+   389→      // duplicate-posting guard
+   390→      const guarded = await tx.productionReport.updateMany({
+   391→        where: { id, postingStatus: 'UNPOSTED' },
+   392→        data: { status: 'CONFIRMED', postingStatus: 'POSTED', postedAt: new Date() },
+   393→      });
+   394→      if (guarded.count === 0) {
+   395→        throw new ApiError(409, 'Report is already confirmed', 'این گزارش قبلاً تأیید شده است', 'duplicate_posting');
+   396→      }
+   397→
+   398→      const op = report.operation;
+   399→      const input = Q(report.inputQuantity);
+   400→      const produced = Q(report.producedQuantity);
+   401→      const rejected = Q(report.rejectedQuantity);
+   402→      const rework = Q(report.reworkQuantity);
+   403→      const scrapTotal = report.scraps.reduce((acc, s) => acc.plus(Q(s.quantity)), new D(0));
+   404→
+   405→      // re-validate conservation inside the tx
+   406→      const outputSum = produced.plus(rejected).plus(rework).plus(scrapTotal);
+   407→      if (!outputSum.equals(input)) {
+   408→        throw new ApiError(422, 'Report is not balanced', 'جمع خروجی‌ها با ورودی برابر نیست', 'report_not_balanced');
+   409→      }
+   410→
+   411→      // feed availability: cumulative input ≤ cumulative received + cumulative rework (re-feed)
+   412→      const inputAfter = Q(op.inputQuantity).plus(input);
+   413→      const feedAvailable = Q(op.receivedQuantity).plus(Q(op.reworkQuantity));
+   414→      if (inputAfter.comparedTo(feedAvailable) > 0) {
+   415→        throw new ApiError(
+   416→          422,
+   417→          `Not enough WIP at operation: feeding ${input.toFixed(4)} but only ${feedAvailable.minus(Q(op.inputQuantity)).toFixed(4)} available`,
+   418→          'موجودی WIP این عملیات برای این میزان تغذیه کافی نیست',
+   419→          'not_enough_wip',
+   420→          { feedAvailable: feedAvailable.minus(Q(op.inputQuantity)).toFixed(4), requested: input.toFixed(4) },
+   421→        );
+   422→      }
+   423→
+   424→      await tx.productionOperation.update({
+   425→        where: { id: op.id },
+   426→        data: {
+   427→          inputQuantity: inputAfter,
+   428→          producedQuantity: Q(op.producedQuantity).plus(produced),
+   429→          rejectedQuantity: Q(op.rejectedQuantity).plus(rejected),
+   430→          reworkQuantity: Q(op.reworkQuantity).plus(rework),
+   431→          scrappedQuantity: Q(op.scrappedQuantity).plus(scrapTotal),
+   432→          status: op.status === 'PENDING' || op.status === 'QUEUED' ? 'IN_PROGRESS' : op.status,
+   433→          wipSinceAt: op.wipSinceAt ?? new Date(),
+   434→        },
+   435→      });
+   436→
+   437→      if (op.manufacturingOrder.status === 'RELEASED') {
+   438→        await tx.manufacturingOrder.update({
+   439→          where: { id: op.manufacturingOrderId },
+   440→          data: { status: 'IN_PROGRESS' },
+   441→        });
+   442→      }
+   443→
+   444→      await recordAudit(tx, {
+   445→        userId,
+   446→        action: 'POST',
+   447→        entityType: 'ProductionReport',
+   448→        entityId: report.id,
+   449→        changes: {
+   450→          reportNumber: report.reportNumber,
+   451→          operationId: op.id,
+   452→          input: input.toFixed(4),
+   453→          produced: produced.toFixed(4),
+   454→          scrap: scrapTotal.toFixed(4),
+   455→          rejected: rejected.toFixed(4),
+   456→          rework: rework.toFixed(4),
+   457→        },
+   458→        ipAddress: meta.ip,
+   459→        userAgent: meta.ua,
+   460→      });
+   461→
+   462→      return tx.productionReport.findUnique({ where: { id }, include: { scraps: true } });
+   463→    },
+   464→    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20_000 },
+   465→  );
+   466→}
+   467→
+   468→export async function cancelProductionReport(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   469→  return db.$transaction(async (tx) => {
+   470→    const report = await tx.productionReport.findUnique({ where: { id } });
+   471→    if (!report) throw new ApiError(404, 'Report not found', 'گزارش یافت نشد', 'report_not_found');
+   472→    if (report.postingStatus !== 'UNPOSTED') {
+   473→      throw new ApiError(
+   474→        409,
+   475→        'Confirmed reports cannot be cancelled — post a correcting report instead',
+   476→        'گزارش تأییدشده قابل ابطال نیست؛ گزارش اصلاحی ثبت کنید',
+   477→        'report_already_posted',
+   478→      );
+   479→    }
+   480→    const updated = await tx.productionReport.update({ where: { id }, data: { status: 'CANCELLED' } });
+   481→    await recordAudit(tx, { userId, action: 'CANCEL', entityType: 'ProductionReport', entityId: id, ipAddress: meta.ip, userAgent: meta.ua });
+   482→    return updated;
+   483→  });
+   484→}
+   485→
+   486→export async function listProductionReports(filters: { operationId?: string; moId?: string; take?: number }) {
+   487→  return db.productionReport.findMany({
+   488→    where: {
+   489→      operationId: filters.operationId,
+   490→      ...(filters.moId ? { operation: { manufacturingOrderId: filters.moId } } : {}),
+   491→    },
+   492→    orderBy: { createdAt: 'desc' },
+   493→    take: filters.take ?? 100,
+   494→    include: {
+   495→      operation: { include: { operation: true, manufacturingOrder: { include: { part: true } } } },
+   496→      machine: { select: { code: true, nameFa: true } },
+   497→      shift: { select: { code: true, nameFa: true } },
+   498→      scraps: true,
+   499→    },
+   500→  });
+   501→}
+   502→
+   503→// ---------------------------------------------------------------------------
+   504→// Production transfers — the ONLY way quantity moves between operations
+   505→// ---------------------------------------------------------------------------
+   506→
+   507→export async function createProductionTransfer(input: unknown, userId: string, meta: { ip?: string; ua?: string }) {
+   508→  const parsed = createTransferSchema.parse(input);
+   509→  const qty = new D(parsed.quantity);
+   510→  if (!qty.isPositive()) {
+   511→    throw new ApiError(422, 'quantity must be positive', 'مقدار باید مثبت باشد', 'bad_quantity');
+   512→  }
+   513→
+   514→  return db.$transaction(async (tx) => {
+   515→    const part = await tx.part.findUnique({ where: { id: parsed.partId } });
+   516→    if (!part) throw new ApiError(404, 'Part not found', 'قطعه یافت نشد', 'part_not_found');
+   517→
+   518→    let fromOp = null;
+   519→    let toOp = null;
+   520→    if (parsed.fromOperationId) {
+   521→      fromOp = await tx.productionOperation.findUnique({ where: { id: parsed.fromOperationId }, include: { manufacturingOrder: true } });
+   522→      if (!fromOp) throw new ApiError(404, 'Source operation not found', 'عملیات مبدأ یافت نشد', 'operation_not_found');
+   523→      if (fromOp.manufacturingOrder.partId !== part.id) {
+   524→        throw new ApiError(422, 'Source operation belongs to a different part', 'عملیات مبدأ متعلق به قطعه دیگری است', 'op_part_mismatch');
+   525→      }
+   526→    }
+   527→    if (parsed.toOperationId) {
+   528→      toOp = await tx.productionOperation.findUnique({ where: { id: parsed.toOperationId }, include: { manufacturingOrder: true } });
+   529→      if (!toOp) throw new ApiError(404, 'Destination operation not found', 'عملیات مقصد یافت نشد', 'operation_not_found');
+   530→      if (toOp.manufacturingOrder.partId !== part.id) {
+   531→        throw new ApiError(422, 'Destination operation belongs to a different part', 'عملیات مقصد متعلق به قطعه دیگری است', 'op_part_mismatch');
+   532→      }
+   533→      if (fromOp && toOp.manufacturingOrderId !== fromOp.manufacturingOrderId) {
+   534→        throw new ApiError(422, 'Operations must belong to the same manufacturing order', 'مبدأ و مقصد باید در یک دستور کار باشند', 'op_mo_mismatch');
+   535→      }
+   536→      if (fromOp && toOp.sequence <= fromOp.sequence) {
+   537→        throw new ApiError(422, 'Destination must be a later operation', 'عملیات مقصد باید بعد از مبدأ باشد', 'op_sequence');
+   538→      }
+   539→    }
+   540→    if (parsed.toWarehouseId) {
+   541→      const wh = await tx.warehouse.findUnique({ where: { id: parsed.toWarehouseId } });
+   542→      if (!wh) throw new ApiError(404, 'Warehouse not found', 'انبار یافت نشد', 'warehouse_not_found');
+   543→      if (wh.warehouseType !== 'FINISHED_GOODS') {
+   544→        throw new ApiError(422, 'Output transfers must target a FINISHED_GOODS warehouse', 'انتقال خروجی باید به انبار محصول تکمیلی باشد', 'warehouse_type');
+   545→      }
+   546→    }
+   547→
+   548→    const transferNumber = await generateDocumentNumber(tx, 'TRF');
+   549→    const transfer = await tx.productionTransfer.create({
+   550→      data: {
+   551→        transferNumber,
+   552→        partId: part.id,
+   553→        fromOperationId: parsed.fromOperationId ?? null,
+   554→        toOperationId: parsed.toOperationId ?? null,
+   555→        fromWarehouseId: parsed.fromWarehouseId ?? null,
+   556→        toWarehouseId: parsed.toWarehouseId ?? null,
+   557→        quantity: qty,
+   558→        weightKg: part.standardWeightKg ? qty.mul(new D(part.standardWeightKg)) : null,
+   559→        transferDate: new Date(`${parsed.transferDate}T00:00:00Z`),
+   560→        status: 'DRAFT',
+   561→        postingStatus: 'UNPOSTED',
+   562→        notes: parsed.notes ?? null,
+   563→      },
+   564→    });
+   565→
+   566→    await recordAudit(tx, {
+   567→      userId,
+   568→      action: 'CREATE',
+   569→      entityType: 'ProductionTransfer',
+   570→      entityId: transfer.id,
+   571→      changes: { transferNumber, quantity: qty.toFixed(4) },
+   572→      ipAddress: meta.ip,
+   573→      userAgent: meta.ua,
+   574→    });
+   575→
+   576→    return transfer;
+   577→  });
+   578→}
+   579→
+   580→/**
+   581→ * Post a production transfer atomically:
+   582→ *  − op → op: source.transferredOut += q, destination.received += q
+   583→ *  − warehouse feed (fromOp = null): destination.received += q (no stock change —
+   584→ *    the raw material was already issued via an inventory document)
+   585→ *  − op → FG warehouse: source.transferredOut += q and a posted
+   586→ *    PRODUCTION_RECEIPT inventory document updates finished-goods stock.
+   587→ */
+   588→export async function postProductionTransfer(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   589→  return db.$transaction(
+   590→    async (tx) => {
+   591→      const transfer = await tx.productionTransfer.findUnique({ where: { id } });
+   592→      if (!transfer) throw new ApiError(404, 'Transfer not found', 'انتقال یافت نشد', 'transfer_not_found');
+   593→      if (transfer.status === 'CANCELLED') {
+   594→        throw new ApiError(409, 'Cancelled transfers cannot be posted', 'انتقال ابطال‌شده قابل قطع‌بوش نیست', 'transfer_cancelled');
+   595→      }
+   596→
+   597→      const guarded = await tx.productionTransfer.updateMany({
+   598→        where: { id, postingStatus: 'UNPOSTED' },
+   599→        data: { status: 'CONFIRMED', postingStatus: 'POSTED' },
+   600→      });
+   601→      if (guarded.count === 0) {
+   602→        throw new ApiError(409, 'Transfer is already posted', 'این انتقال قبلاً قطع‌بوش شده است', 'duplicate_posting');
+   603→      }
+   604→
+   605→      const qty = Q(transfer.quantity);
+   606→      const occurredAt = new Date();
+   607→
+   608→      if (transfer.fromOperationId) {
+   609→        const fromOp = await tx.productionOperation.findUnique({ where: { id: transfer.fromOperationId } });
+   610→        if (!fromOp) throw new ApiError(404, 'Source operation not found', 'عملیات مبدأ یافت نشد', 'operation_not_found');
+   611→        const ready = Q(fromOp.producedQuantity).minus(Q(fromOp.transferredOutQuantity));
+   612→        if (qty.comparedTo(ready) > 0) {
+   613→          throw new ApiError(
+   614→            422,
+   615→            `Only ${ready.toFixed(4)} pcs are ready for transfer at the source operation`,
+   616→            'مقدار آماده انتقال در عملیات مبدأ کافی نیست',
+   617→            'not_ready_for_transfer',
+   618→            { ready: ready.toFixed(4), requested: qty.toFixed(4) },
+   619→          );
+   620→        }
+   621→        await tx.productionOperation.update({
+   622→          where: { id: fromOp.id },
+   623→          data: { transferredOutQuantity: Q(fromOp.transferredOutQuantity).plus(qty) },
+   624→        });
+   625→      }
+   626→
+   627→      if (transfer.toOperationId) {
+   628→        const toOp = await tx.productionOperation.findUnique({ where: { id: transfer.toOperationId } });
+   629→        if (!toOp) throw new ApiError(404, 'Destination operation not found', 'عملیات مقصد یافت نشد', 'operation_not_found');
+   630→        await tx.productionOperation.update({
+   631→          where: { id: toOp.id },
+   632→          data: {
+   633→            receivedQuantity: Q(toOp.receivedQuantity).plus(qty),
+   634→            status: toOp.status === 'PENDING' ? 'QUEUED' : toOp.status,
+   635→            wipSinceAt: toOp.wipSinceAt ?? occurredAt,
+   636→          },
+   637→        });
+   638→        const toMo = await tx.manufacturingOrder.findUnique({ where: { id: toOp.manufacturingOrderId } });
+   639→        if (toMo && toMo.status === 'RELEASED') {
+   640→          await tx.manufacturingOrder.update({ where: { id: toMo.id }, data: { status: 'IN_PROGRESS' } });
+   641→        }
+   642→      }
+   643→
+   644→      if (transfer.toWarehouseId) {
+   645→        // finished-goods receipt — posted inventory document inside the same tx
+   646→        const documentNumber = await generateDocumentNumber(tx, 'INV');
+   647→        const part = await tx.part.findUnique({ where: { id: transfer.partId } });
+   648→        if (!part) throw new ApiError(404, 'Part not found', 'قطعه یافت نشد', 'part_not_found');
+   649→        const unitId = part.baseUnitId;
+   650→        const weightKg = transfer.weightKg;
+   651→
+   652→        const invDoc = await tx.inventoryDocument.create({
+   653→          data: {
+   654→            documentNumber,
+   655→            documentType: 'PRODUCTION_RECEIPT',
+   656→            status: 'CONFIRMED',
+   657→            postingStatus: 'UNPOSTED',
+   658→            documentDate: transfer.transferDate,
+   659→            warehouseId: transfer.toWarehouseId,
+   660→            referenceType: 'PRODUCTION_TRANSFER',
+   661→            referenceId: transfer.id,
+   662→            description: `رسید تولید — انتقال ${transfer.transferNumber}`,
+   663→            createdById: userId,
+   664→            lines: {
+   665→              create: {
+   666→                lineNo: 1,
+   667→                partId: transfer.partId,
+   668→                quantity: qty,
+   669→                unitId,
+   670→                weightKg,
+   671→                toLocationId: null,
+   672→                notes: `انتقال تولید ${transfer.transferNumber}`,
+   673→              },
+   674→            },
+   675→          },
+   676→          include: { lines: true },
+   677→        });
+   678→
+   679→        await tx.inventoryTransaction.create({
+   680→          data: {
+   681→            transactionNumber: await generateDocumentNumber(tx, 'TX'),
+   682→            documentId: invDoc.id,
+   683→            documentLineId: invDoc.lines[0]!.id,
+   684→            type: 'RECEIPT',
+   685→            partId: transfer.partId,
+   686→            warehouseId: transfer.toWarehouseId,
+   687→            locationId: invDoc.lines[0]!.toLocationId,
+   688→            ownership: 'OWNED',
+   689→            qualityStatus: 'APPROVED',
+   690→            quantity: qty,
+   691→            unitId,
+   692→            weightKg,
+   693→            createdById: userId,
+   694→          },
+   695→        });
+   696→
+   697→        // balance upsert (FG receipts are always positive)
+   698→        const balanceKey = [
+   699→          transfer.partId, '-', transfer.toWarehouseId, invDoc.lines[0]!.toLocationId ?? '-', '-', unitId, 'OWNED', 'APPROVED',
+   700→        ].join(':');
+   701→        const existing = await tx.stockBalance.findUnique({ where: { balanceKey } });
+   702→        if (existing) {
+   703→          await tx.stockBalance.update({
+   704→            where: { id: existing.id },
+   705→            data: {
+   706→              quantity: Q(existing.quantity).plus(qty),
+   707→              weightKg: Q(existing.weightKg).plus(weightKg ?? 0),
+   708→              lastTransactionAt: occurredAt,
+   709→            },
+   710→          });
+   711→        } else {
+   712→          await tx.stockBalance.create({
+   713→            data: {
+   714→              partId: transfer.partId,
+   715→              materialId: null,
+   716→              warehouseId: transfer.toWarehouseId,
+   717→              locationId: invDoc.lines[0]!.toLocationId,
+   718→              lotId: null,
+   719→              unitId,
+   720→              ownership: 'OWNED',
+   721→              qualityStatus: 'APPROVED',
+   722→              balanceKey,
+   723→              quantity: qty,
+   724→              weightKg: weightKg ?? new D(0),
+   725→              lastTransactionAt: occurredAt,
+   726→            },
+   727→          });
+   728→        }
+   729→
+   730→        await tx.inventoryDocument.update({
+   731→          where: { id: invDoc.id },
+   732→          data: { postingStatus: 'POSTED', postedById: userId, postedAt: occurredAt },
+   733→        });
+   734→        await recordAudit(tx, {
+   735→          userId,
+   736→          action: 'POST',
+   737→          entityType: 'InventoryDocument',
+   738→          entityId: invDoc.id,
+   739→          changes: { via: 'PRODUCTION_TRANSFER', transferNumber: transfer.transferNumber },
+   740→          ipAddress: meta.ip,
+   741→          userAgent: meta.ua,
+   742→        });
+   743→      }
+   744→
+   745→      // keep the MO in progress
+   746→      if (transfer.fromOperationId) {
+   747→        const fromOp = await tx.productionOperation.findUnique({ where: { id: transfer.fromOperationId } });
+   748→        if (fromOp) {
+   749→          const mo = await tx.manufacturingOrder.findUnique({ where: { id: fromOp.manufacturingOrderId } });
+   750→          if (mo && mo.status === 'RELEASED') {
+   751→            await tx.manufacturingOrder.update({ where: { id: mo.id }, data: { status: 'IN_PROGRESS' } });
+   752→          }
+   753→        }
+   754→      }
+   755→
+   756→      await recordAudit(tx, {
+   757→        userId,
+   758→        action: 'POST',
+   759→        entityType: 'ProductionTransfer',
+   760→        entityId: transfer.id,
+   761→        changes: { transferNumber: transfer.transferNumber, quantity: qty.toFixed(4) },
+   762→        ipAddress: meta.ip,
+   763→        userAgent: meta.ua,
+   764→      });
+   765→
+   766→      return tx.productionTransfer.findUnique({ where: { id }, include: { fromOperation: true, toOperation: true } });
+   767→    },
+   768→    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000 },
+   769→  );
+   770→}
+   771→
+   772→export async function reverseProductionTransfer(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   773→  return db.$transaction(
+   774→    async (tx) => {
+   775→      const transfer = await tx.productionTransfer.findUnique({ where: { id } });
+   776→      if (!transfer) throw new ApiError(404, 'Transfer not found', 'انتقال یافت نشد', 'transfer_not_found');
+   777→      if (transfer.postingStatus === 'UNPOSTED') {
+   778→        throw new ApiError(409, 'Draft transfers are cancelled, not reversed', 'انتقال پیش‌نویس ابطال می‌شود', 'transfer_not_posted');
+   779→      }
+   780→      if (transfer.postingStatus === 'REVERSED') {
+   781→        throw new ApiError(409, 'Transfer is already reversed', 'این انتقال قبلاً ابطال شده است', 'already_reversed');
+   782→      }
+   783→      const guarded = await tx.productionTransfer.updateMany({
+   784→        where: { id, postingStatus: 'POSTED' },
+   785→        data: { postingStatus: 'REVERSED' },
+   786→      });
+   787→      if (guarded.count === 0) {
+   788→        throw new ApiError(409, 'Transfer state changed concurrently', 'وضعیت انتقال هم‌زمان تغییر کرده است', 'conflict');
+   789→      }
+   790→
+   791→      const qty = Q(transfer.quantity);
+   792→
+   793→      if (transfer.fromOperationId) {
+   794→        const fromOp = await tx.productionOperation.findUnique({ where: { id: transfer.fromOperationId } });
+   795→        if (fromOp) {
+   796→          await tx.productionOperation.update({
+   797→            where: { id: fromOp.id },
+   798→            data: { transferredOutQuantity: Q(fromOp.transferredOutQuantity).minus(qty) },
+   799→          });
+   800→        }
+   801→      }
+   802→      if (transfer.toOperationId) {
+   803→        const toOp = await tx.productionOperation.findUnique({ where: { id: transfer.toOperationId } });
+   804→        if (toOp) {
+   805→          await tx.productionOperation.update({
+   806→            where: { id: toOp.id },
+   807→            data: { receivedQuantity: Q(toOp.receivedQuantity).minus(qty) },
+   808→          });
+   809→        }
+   810→      }
+   811→
+   812→      if (transfer.toWarehouseId) {
+   813→        // reverse the linked FG receipt: find the posted PRODUCTION_RECEIPT doc
+   814→        const receiptDoc = await tx.inventoryDocument.findFirst({
+   815→          where: { documentType: 'PRODUCTION_RECEIPT', referenceType: 'PRODUCTION_TRANSFER', referenceId: transfer.id, postingStatus: 'POSTED' },
+   816→        });
+   817→        if (receiptDoc) {
+   818→          await tx.inventoryDocument.update({ where: { id: receiptDoc.id }, data: { postingStatus: 'REVERSED' } });
+   819→          const originalTxs = await tx.inventoryTransaction.findMany({ where: { documentId: receiptDoc.id } });
+   820→          for (const t of originalTxs) {
+   821→            await tx.inventoryTransaction.create({
+   822→              data: {
+   823→                transactionNumber: await generateDocumentNumber(tx, 'TX'),
+   824→                documentId: receiptDoc.id,
+   825→                documentLineId: t.documentLineId,
+   826→                type: 'ISSUE',
+   827→                partId: t.partId,
+   828→                materialId: t.materialId,
+   829→                warehouseId: t.warehouseId,
+   830→                locationId: t.locationId,
+   831→                lotId: t.lotId,
+   832→                ownership: t.ownership,
+   833→                qualityStatus: t.qualityStatus,
+   834→                quantity: new D(t.quantity).abs(),
+   835→                unitId: t.unitId,
+   836→                weightKg: t.weightKg ? new D(t.weightKg).abs() : null,
+   837→                reversalOfId: t.id,
+   838→                createdById: userId,
+   839→              },
+   840→            });
+   841→            const deltaQ = new D(t.quantity).abs().neg();
+   842→            const deltaW = t.weightKg ? new D(t.weightKg).abs().neg() : new D(0);
+   843→            const balanceKey = [
+   844→              t.partId ?? '-', t.materialId ?? '-', t.warehouseId, t.locationId ?? '-', t.lotId ?? '-', t.unitId, t.ownership, t.qualityStatus,
+   845→            ].join(':');
+   846→            const bal = await tx.stockBalance.findUnique({ where: { balanceKey } });
+   847→            if (bal) {
+   848→              await tx.stockBalance.update({
+   849→                where: { id: bal.id },
+   850→                data: {
+   851→                  quantity: Q(bal.quantity).plus(deltaQ),
+   852→                  weightKg: Q(bal.weightKg).plus(deltaW),
+   853→                  lastTransactionAt: new Date(),
+   854→                },
+   855→              });
+   856→            }
+   857→          }
+   858→          await recordAudit(tx, {
+   859→            userId,
+   860→            action: 'REVERSE',
+   861→            entityType: 'InventoryDocument',
+   862→            entityId: receiptDoc.id,
+   863→            changes: { via: 'PRODUCTION_TRANSFER_REVERSAL', transferNumber: transfer.transferNumber },
+   864→            ipAddress: meta.ip,
+   865→            userAgent: meta.ua,
+   866→          });
+   867→        }
+   868→      }
+   869→
+   870→      await recordAudit(tx, {
+   871→        userId,
+   872→        action: 'REVERSE',
+   873→        entityType: 'ProductionTransfer',
+   874→        entityId: transfer.id,
+   875→        changes: { transferNumber: transfer.transferNumber, quantity: qty.toFixed(4) },
+   876→        ipAddress: meta.ip,
+   877→        userAgent: meta.ua,
+   878→      });
+   879→
+   880→      return tx.productionTransfer.findUnique({ where: { id } });
+   881→    },
+   882→    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000 },
+   883→  );
+   884→}
+   885→
+   886→export async function listProductionTransfers(filters: { moId?: string; partId?: string; take?: number }) {
+   887→  return db.productionTransfer.findMany({
+   888→    where: {
+   889→      partId: filters.partId,
+   890→      ...(filters.moId
+   891→        ? {
+   892→            OR: [
+   893→              { fromOperation: { manufacturingOrderId: filters.moId } },
+   894→              { toOperation: { manufacturingOrderId: filters.moId } },
+   895→            ],
+   896→          }
+   897→        : {}),
+   898→    },
+   899→    orderBy: { createdAt: 'desc' },
+   900→    take: filters.take ?? 100,
+   901→    include: {
+   902→      part: { select: { partNumber: true, nameFa: true } },
+   903→      fromOperation: { include: { operation: true, manufacturingOrder: { select: { moNumber: true } } } },
+   904→      toOperation: { include: { operation: true, manufacturingOrder: { select: { moNumber: true } } } },
+   905→      fromWarehouse: { select: { code: true, nameFa: true } },
+   906→      toWarehouse: { select: { code: true, nameFa: true } },
+   907→    },
+   908→  });
+   909→}
+   910→
+   911→// ---------------------------------------------------------------------------
+   912→// WIP dashboard
+   913→// ---------------------------------------------------------------------------
+   914→
+   915→export async function getWipDashboard() {
+   916→  const ops = await db.productionOperation.findMany({
+   917→    where: { manufacturingOrder: { status: { in: ['RELEASED', 'IN_PROGRESS'] } } },
+   918→    include: {
+   919→      operation: { select: { code: true, nameFa: true } },
+   920→      machine: { select: { code: true, nameFa: true } },
+   921→      manufacturingOrder: {
+   922→        select: { moNumber: true, status: true, quantity: true, dueDate: true, part: { select: { partNumber: true, nameFa: true } } },
+   923→      },
+   924→    },
+   925→    orderBy: [{ manufacturingOrderId: 'asc' }, { sequence: 'asc' }],
+   926→  });
+   927→
+   928→  const now = Date.now();
+   929→  const rows = ops.map((op) => {
+   930→    const received = Q(op.receivedQuantity);
+   931→    const input = Q(op.inputQuantity);
+   932→    const produced = Q(op.producedQuantity);
+   933→    const scrap = Q(op.scrappedQuantity);
+   934→    const rejected = Q(op.rejectedQuantity);
+   935→    const rework = Q(op.reworkQuantity);
+   936→    const transferredOut = Q(op.transferredOutQuantity);
+   937→
+   938→    const waitingToProcess = received.plus(rework).minus(input); // arrived + rework pending re-feed
+   939→    const processing = input.minus(produced).minus(scrap).minus(rejected).minus(rework);
+   940→    const readyForTransfer = produced.minus(transferredOut);
+   941→    const wipTotal = received.minus(transferredOut).minus(scrap).minus(rejected);
+   942→    const agingHours = op.wipSinceAt ? Math.max(0, (now - op.wipSinceAt.getTime()) / 3_600_000) : 0;
+   943→
+   944→    return {
+   945→      operationId: op.id,
+   946→      moNumber: op.manufacturingOrder.moNumber,
+   947→      partNumber: op.manufacturingOrder.part.partNumber,
+   948→      partName: op.manufacturingOrder.part.nameFa,
+   949→      sequence: op.sequence,
+   950→      operationCode: op.operation.code,
+   951→      operationName: op.operation.nameFa,
+   952→      machineCode: op.machine?.code ?? null,
+   953→      opStatus: op.status,
+   954→      plannedQuantity: Q(op.plannedQuantity).toFixed(4),
+   955→      receivedQuantity: received.toFixed(4),
+   956→      inputQuantity: input.toFixed(4),
+   957→      producedQuantity: produced.toFixed(4),
+   958→      scrappedQuantity: scrap.toFixed(4),
+   959→      rejectedQuantity: rejected.toFixed(4),
+   960→      reworkQuantity: rework.toFixed(4),
+   961→      transferredOutQuantity: transferredOut.toFixed(4),
+   962→      waitingToProcess: waitingToProcess.toFixed(4),
+   963→      processing: processing.toFixed(4),
+   964→      readyForTransfer: readyForTransfer.toFixed(4),
+   965→      wipTotal: wipTotal.toFixed(4),
+   966→      agingHours: Math.round(agingHours * 10) / 10,
+   967→    };
+   968→  });
+   969→
+   970→  const totals = rows.reduce(
+   971→    (acc, r) => ({
+   972→      waitingToProcess: acc.waitingToProcess.plus(new D(r.waitingToProcess)),
+   973→      processing: acc.processing.plus(new D(r.processing)),
+   974→      readyForTransfer: acc.readyForTransfer.plus(new D(r.readyForTransfer)),
+   975→      wipTotal: acc.wipTotal.plus(new D(r.wipTotal)),
+   976→      scrap: acc.scrap.plus(new D(r.scrappedQuantity)),
+   977→      rejected: acc.rejected.plus(new D(r.rejectedQuantity)),
+   978→    }),
+   979→    { waitingToProcess: new D(0), processing: new D(0), readyForTransfer: new D(0), wipTotal: new D(0), scrap: new D(0), rejected: new D(0) },
+   980→  );
+   981→
+   982→  return {
+   983→    totals: {
+   984→      waitingToProcess: totals.waitingToProcess.toFixed(2),
+   985→      processing: totals.processing.toFixed(2),
+   986→      readyForTransfer: totals.readyForTransfer.toFixed(2),
+   987→      wipTotal: totals.wipTotal.toFixed(2),
+   988→      scrap: totals.scrap.toFixed(2),
+   989→      rejected: totals.rejected.toFixed(2),
+   990→    },
+   991→    operations: rows,
+   992→    generatedAt: new Date().toISOString(),
+   993→  };
+   994→}
+   995→
+   996→/** Reconciliation: verify quantity conservation across WIP + FG for a part. */
+   997→export async function getWipReconciliation(partId?: string) {
+   998→  const mos = await db.manufacturingOrder.findMany({
+   999→    where: { partId, status: { in: ['RELEASED', 'IN_PROGRESS', 'COMPLETED'] } },
+  1000→    include: { operations: { orderBy: { sequence: 'asc' } } },
+  1001→  });
+  1002→  const rows = mos.map((mo) => {
+  1003→    const firstOp = mo.operations[0];
+  1004→    const fedFromWarehouse = firstOp ? Q(firstOp.receivedQuantity) : new D(0);
+  1005→    const lastOp = mo.operations[mo.operations.length - 1];
+  1006→    const toFg = lastOp ? Q(lastOp.transferredOutQuantity) : new D(0);
+  1007→    const scrapAndRejected = mo.operations.reduce(
+  1008→      (acc, op) => acc.plus(Q(op.scrappedQuantity)).plus(Q(op.rejectedQuantity)),
+  1009→      new D(0),
+  1010→    );
+  1011→    const wip = mo.operations.reduce(
+  1012→      (acc, op) => acc.plus(Q(op.receivedQuantity)).minus(Q(op.transferredOutQuantity)).minus(Q(op.scrappedQuantity)).minus(Q(op.rejectedQuantity)),
+  1013→      new D(0),
+  1014→    );
+  1015→    return {
+  1016→      moNumber: mo.moNumber,
+  1017→      fedFromWarehouse: fedFromWarehouse.toFixed(4),
+  1018→      transferredToFg: toFg.toFixed(4),
+  1019→      scrapAndRejected: scrapAndRejected.toFixed(4),
+  1020→      wipRemaining: wip.toFixed(4),
+  1021→      conserved: fedFromWarehouse.minus(toFg).minus(scrapAndRejected).minus(wip).abs().comparedTo('0.0001') <= 0,
+  1022→    };
+  1023→  });
+  1024→  return rows;
+  1025→}
+  1026→

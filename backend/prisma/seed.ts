@@ -30,7 +30,9 @@ async function main(): Promise<void> {
 
   const existingUsers = await db.user.count();
   if (existingUsers > 0) {
-    console.log(`[seed] users already exist (${existingUsers}) — skipping seed (idempotent).`);
+    console.log(`[seed] users already exist (${existingUsers}) — skipping full seed (idempotent).`);
+    await ensureDemoBom();
+    await ensurePlanningPostGrant();
     return;
   }
 
@@ -50,13 +52,13 @@ async function main(): Promise<void> {
     data: { code: 'CUT', nameFa: 'برش ورق', nameEn: 'Cutting', defaultSetupTimeMin: 20, defaultCycleTimeSec: 30 },
   });
   const opBlank = await db.operation.create({
-    data: { code: 'BLK', nameFa: 'خالی‌بری', nameEn: 'Blanking', defaultSetupTimeMin: 30, defaultCycleTimeSec: 12 },
+    data: { code: 'BLK', nameFa: 'خالی‌بری', nameEn: 'Blanking', defaultSetupTimeMin: 30, defaultCycleTimeSec: 12, requiresDie: true },
   });
   const opBend = await db.operation.create({
     data: { code: 'BND', nameFa: 'خم‌کاری', nameEn: 'Bending', defaultSetupTimeMin: 25, defaultCycleTimeSec: 15 },
   });
   const opForm = await db.operation.create({
-    data: { code: 'FRM', nameFa: 'پرس و فرم‌دهی', nameEn: 'Punching / Forming', defaultSetupTimeMin: 25, defaultCycleTimeSec: 15 },
+    data: { code: 'FRM', nameFa: 'پرس و فرم‌دهی', nameEn: 'Punching / Forming', defaultSetupTimeMin: 25, defaultCycleTimeSec: 15, requiresDie: true },
   });
   const opPressWeld = await db.operation.create({
     data: { code: 'PRW', nameFa: 'جوش پرس', nameEn: 'Press welding', defaultSetupTimeMin: 20, defaultCycleTimeSec: 10 },
@@ -390,7 +392,7 @@ async function main(): Promise<void> {
   await grant(roleAdmin.id, [...permissionIds.keys()]);
   await grant(roleProduction.id, [
     'dashboard.view', 'masterdata.view', 'production.view', 'production.manage', 'production.post',
-    'wip.view', 'wip.manage', 'planning.view', 'planning.manage', 'capacity.view', 'reports.view',
+    'wip.view', 'wip.manage', 'planning.view', 'planning.manage', 'planning.post', 'capacity.view', 'reports.view',
   ]);
   await grant(roleWarehouse.id, [
     'dashboard.view', 'masterdata.view', 'inventory.view', 'inventory.manage', 'inventory.post',
@@ -451,6 +453,52 @@ async function main(): Promise<void> {
   console.log('        - 7 document sequences, 6 system settings');
   console.log('[seed] demo users: admin | planner | keeper | viewer  — password: Kpims@1404');
   console.log('[seed] NO operational transactions were created (by design in Phase 1).');
+  await ensureDemoBom();
+  await ensurePlanningPostGrant();
+}
+
+/**
+ * Idempotent demo BOM (part_material_requirements) for the five demo parts.
+ * DEMO DATA: consumption per unit = the part standard weight (net).
+ * Only fills rows that do not exist yet; never overwrites manual entries.
+ */
+/** Idempotent backfill: the planner (production manager) role may confirm plans. */
+async function ensurePlanningPostGrant(): Promise<void> {
+  const perm = await db.permission.findUnique({ where: { code: 'planning.post' } });
+  const role = await db.role.findUnique({ where: { name: 'PRODUCTION_MANAGER' } });
+  if (!perm || !role) return;
+  const exists = await db.rolePermission.findUnique({ where: { roleId_permissionId: { roleId: role.id, permissionId: perm.id } }, select: { roleId: true } });
+  if (!exists) {
+    await db.rolePermission.create({ data: { roleId: role.id, permissionId: perm.id } });
+    console.log('[seed] granted planning.post to PRODUCTION_MANAGER (برنامه‌ریز می‌تواند برنامه را تأیید کند).');
+  }
+}
+
+async function ensureDemoBom(): Promise<void> {
+  const parts = await db.part.findMany({
+    where: { partNumber: { in: ['KP-1001', 'KP-1002', 'KP-1003', 'KP-1004', 'KP-1005'] }, mainMaterialId: { not: null } },
+    select: { id: true, partNumber: true, mainMaterialId: true, standardWeightKg: true },
+  });
+  let created = 0;
+  for (const part of parts) {
+    if (!part.mainMaterialId || !part.standardWeightKg) continue;
+    const exists = await db.partMaterialRequirement.findFirst({
+      where: { partId: part.id, materialId: part.mainMaterialId },
+      select: { id: true },
+    });
+    if (exists) continue;
+    await db.partMaterialRequirement.create({
+      data: {
+        partId: part.id,
+        materialId: part.mainMaterialId,
+        quantityPerUnit: part.standardWeightKg,
+        weightKgPerUnit: part.standardWeightKg,
+        notes: 'نمونه (DEMO) — سرانه مصرف برابر وزن استاندارد قطعه',
+      },
+    });
+    created += 1;
+  }
+  if (created > 0) console.log(`[seed] demo BOM rows created for ${created} part(s) (DEMO — سرانه مصرف = وزن استاندارد).`);
 }
 
 main()
