@@ -15,6 +15,6 @@ export const MODULES: ModuleInfo[] = [
   { key: 'production-planning', titleFa: 'برنامه‌ریزی تولید', titleEn: 'Production Planning', status: 'ready' },
   { key: 'machines', titleFa: 'ماشین‌آلات و ظرفیت', titleEn: 'Machines and Capacity', status: 'planned' },
   { key: 'sapco-materials', titleFa: 'مواد SAPCO', titleEn: 'SAPCO Materials', status: 'ready' },
-  { key: 'reports', titleFa: 'گزارش‌ها', titleEn: 'Reports', status: 'planned' },
+  { key: 'reports', titleFa: 'گزارش‌ها', titleEn: 'Reports', status: 'ready' },
   { key: 'settings', titleFa: 'کاربران و تنظیمات', titleEn: 'Users and Settings', status: 'planned' },
 ];

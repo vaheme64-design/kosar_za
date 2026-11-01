@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { authenticate } from '../../middleware/auth';
+import { authenticate, requirePermission } from '../../middleware/auth';
 import { db } from '../../config/db';
 
 export const masterDataRouter = Router();
 
-masterDataRouter.use(authenticate);
+masterDataRouter.use(authenticate, requirePermission('masterdata.view'));
 
 /**
  * Read-only lookups for the operational forms (Phase 2/3 UI).
@@ -12,7 +12,7 @@ masterDataRouter.use(authenticate);
  * exposes compact lists needed to build inventory/production documents.
  */
 masterDataRouter.get('/lookups', async (_req, res) => {
-  const [parts, materials, warehouses, locations, units, lots, contracts, shifts, machines, customers, routes] =
+  const [parts, materials, warehouses, locations, units, lots, contracts, shifts, machines, customers, routes, operations] =
     await Promise.all([
       db.part.findMany({
         where: { status: 'ACTIVE' },
@@ -71,7 +71,12 @@ masterDataRouter.get('/lookups', async (_req, res) => {
         select: { id: true, partId: true, version: true, name: true },
         orderBy: { version: 'desc' },
       }),
+      db.operation.findMany({
+        where: { isActive: true },
+        select: { id: true, code: true, nameFa: true },
+        orderBy: { code: 'asc' },
+      }),
     ]);
 
-  res.json({ parts, materials, warehouses, locations, units, lots, contracts, shifts, machines, customers, routes });
+  res.json({ parts, materials, warehouses, locations, units, lots, contracts, shifts, machines, customers, routes, operations });
 });

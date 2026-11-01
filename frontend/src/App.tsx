@@ -27,6 +27,9 @@ import { WipDashboardPage } from './pages/wip/WipDashboardPage';
 import { PlanningDashboardPage } from './pages/planning/PlanningDashboardPage';
 import { PlanDetailPage } from './pages/planning/PlanDetailPage';
 
+import { ReportsIndexPage } from './pages/reports/ReportsIndexPage';
+import { ReportViewerPage } from './pages/reports/ReportViewerPage';
+
 export default function App() {
   return (
     <Routes>
@@ -59,6 +62,10 @@ export default function App() {
           {/* برنامه‌ریزی تولید — فاز ۴ */}
           <Route path="/production-planning" element={<PlanningDashboardPage />} />
           <Route path="/production-planning/plans/:id" element={<PlanDetailPage />} />
+
+          {/* گزارش‌های مدیریتی — فاز ۵ */}
+          <Route path="/reports" element={<ReportsIndexPage />} />
+          <Route path="/reports/:key" element={<ReportViewerPage />} />
 
           {MODULES.filter((m) => m.status === 'planned').map((m) => (
             <Route

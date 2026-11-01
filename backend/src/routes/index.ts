@@ -5,6 +5,7 @@ import { dashboardRouter } from '../modules/dashboard/dashboard.routes';
 import { inventoryRouter } from '../modules/inventory/inventory.routes';
 import { productionRouter, wipRouter } from '../modules/production/production.routes';
 import { planningRouter } from '../modules/planning/planning.routes';
+import { reportsRouter } from '../modules/reports/reports.routes';
 import { masterDataRouter } from '../modules/masterdata/masterdata.routes';
 import { authenticate } from '../middleware/auth';
 import { MODULES } from '../config/modules';
@@ -21,6 +22,7 @@ apiRouter.use('/inventory', inventoryRouter);
 apiRouter.use('/production', productionRouter);
 apiRouter.use('/wip', wipRouter);
 apiRouter.use('/planning', planningRouter);
+apiRouter.use('/reports', reportsRouter);
 
 // read-only lookups (master-data CRUD arrives in its own phase)
 apiRouter.use('/master-data', masterDataRouter);
@@ -30,8 +32,8 @@ apiRouter.get('/meta/modules', authenticate, (_req, res) => {
 });
 
 // ---- planned modules (later phases): explicit, documented 501 stubs ----
-// production-planning, machines, reports, settings still have their Phase-1
-// database schema but no business services yet.
+// machines, settings still have their Phase-1 database schema but no
+// business services yet (reports arrived in Phase 5).
 const plannedModules = MODULES.filter((m) => m.status === 'planned' && m.key !== 'master-data');
 for (const module of plannedModules) {
   const stub = Router();

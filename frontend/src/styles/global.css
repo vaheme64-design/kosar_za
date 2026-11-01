@@ -1055,3 +1055,31 @@ code {
 .op-card__details summary { cursor: pointer; color: var(--primary-strong); font-size: 0.82rem; font-weight: 700; margin: 6px 0; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
 .row-muted { opacity: 0.62; }
+
+/* ------------------------------------------------------------------
+   Phase 5 — management reports (index cards, viewer legend, notes, drill modal)
+   ------------------------------------------------------------------ */
+.report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.report-card { text-decoration: none; color: var(--text); display: flex; flex-direction: column; gap: 8px; transition: border-color 0.15s ease, transform 0.15s ease; }
+.report-card:hover { border-color: var(--primary); transform: translateY(-2px); }
+.report-card__head { display: flex; align-items: center; gap: 10px; }
+.report-card__head h3 { margin: 0; font-size: 0.95rem; }
+.report-card__icon { width: 38px; height: 38px; border-radius: 11px; background: var(--primary-soft); color: var(--primary-strong); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.report-card__desc { margin: 0; font-size: 0.8rem; color: var(--text-2); line-height: 1.9; flex: 1; }
+.report-card__foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.report-card__filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.report-card__open { display: inline-flex; align-items: center; gap: 4px; font-size: 0.75rem; font-weight: 700; color: var(--primary-strong); }
+.report-legend { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; }
+.report-legend__text { font-size: 0.72rem; color: var(--text-2); }
+.report-notes { margin: 0; padding-inline-start: 18px; font-size: 0.82rem; color: var(--text-2); line-height: 2; }
+.modal__links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+
+/* ---- operations KPI section (dashboard) ---- */
+.kpi-section { margin-top: 4px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+.kpi-tile { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: #fbfdfe; }
+.kpi-tile__head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.kpi-tile__label { font-size: 0.78rem; color: var(--text-2); font-weight: 700; }
+.kpi-tile__value { font-size: 1.25rem; font-weight: 800; color: var(--text); }
+.kpi-tile__sub { font-size: 0.72rem; color: var(--text-2); margin-top: 2px; }
+.kpi-note { font-size: 0.75rem; color: var(--text-2); margin-top: 8px; line-height: 1.9; }

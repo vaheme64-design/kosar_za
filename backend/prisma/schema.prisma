@@ -847,6 +847,8 @@ model CustomerOrderLine {
 
   @@unique([orderId, lineNo])
   @@index([partId])
+  @@index([dueDate])
+  @@index([status])
   @@map("customer_order_lines")
 }
 
@@ -1040,6 +1042,7 @@ model ManufacturingOrder {
   @@index([partId])
   @@index([status])
   @@index([dueDate])
+  @@index([completedAt])
   @@index([routeId])
   @@index([planLineId])
   @@map("manufacturing_orders")
@@ -1096,6 +1099,7 @@ model ProductionOperation {
   @@index([operationId])
   @@index([machineId])
   @@index([status])
+  @@index([plannedEnd])
   @@map("production_operations")
 }
 

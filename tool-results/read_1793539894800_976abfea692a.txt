@@ -1,0 +1,503 @@
+     1→/**
+     2→ * KPIMS — Phase 5: management reporting reconciliation tests.
+     3→ *
+     4→ * Every report figure is checked against the raw records that must back it
+     5→ * (production reports, the immutable inventory ledger, stock balances, WIP
+     6→ * aggregates). The suite also proves: CSV export shape, drill-down to source
+     7→ * documents, machine-utilization gating on reliable capacity data, and that
+     8→ * a drifted stock balance is detected by the reconciliation report.
+     9→ */
+    10→import { describe, it, expect, beforeAll } from 'vitest';
+    11→import {
+    12→  createCustomerOrder,
+    13→} from '../src/modules/planning/planning.service';
+    14→import { getOperationsDashboard } from '../src/modules/dashboard/dashboard.routes';
+    15→import {
+    16→  createManufacturingOrder,
+    17→  releaseManufacturingOrder,
+    18→  createProductionReport,
+    19→  confirmProductionReport,
+    20→  createProductionTransfer,
+    21→  postProductionTransfer,
+    22→} from '../src/modules/production/production.service';
+    23→import { createDocument, postDocument } from '../src/modules/inventory/inventory.service';
+    24→import {
+    25→  planVsActual,
+    26→  orderFulfillment,
+    27→  backlog,
+    28→  wipByPartOperation,
+    29→  wipAging,
+    30→  materialConsumption,
+    31→  sapcoAccount,
+    32→  inventoryValuation,
+    33→  scrapReport,
+    34→  machineWorkload,
+    35→  productionDelays,
+    36→  inventoryMovements,
+    37→  inventoryReconciliation,
+    38→  drillDown,
+    39→} from '../src/modules/reports/reports.service';
+    40→import { reportToCsv } from '../src/modules/reports/reports.helpers';
+    41→import { db, buildFixtures, uniqueCode, ledgerSum, type Fixtures } from './helpers';
+    42→
+    43→const iso = (offsetDays: number): string => new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+    44→const d = (v: string | number | null | undefined) => Number(v ?? 0);
+    45→
+    46→describe('phase 5 — management reporting & control (integration)', () => {
+    47→  let f: Fixtures;
+    48→  let customerId: string;
+    49→  let lineId: string;
+    50→  let lineOverdueId: string;
+    51→  let moId: string;
+    52→  let moOps: { id: string; sequence: number }[] = [];
+    53→  let mo2Id: string;
+    54→  let machineCapId: string; // PNT-501 (has PNT capability, 150/h)
+    55→  let machineNoCapId: string; // CUT-201 (no BLK capability)
+    56→  let lotOwnedId: string;
+    57→  let part2Id: string; // produced without BOM
+    58→  let partNumber: string;
+    59→  let whCode: string;
+    60→  const period = { from: iso(-3), to: iso(1) };
+    61→
+    62→  beforeAll(async () => {
+    63→    f = await buildFixtures();
+    64→    const unitPcs = await db.unitOfMeasure.findUniqueOrThrow({ where: { code: 'PCS' } });
+    65→    const unitKg = await db.unitOfMeasure.findUniqueOrThrow({ where: { code: 'KG' } });
+    66→    partNumber = (await db.part.findUniqueOrThrow({ where: { id: f.partId } })).partNumber;
+    67→    whCode = (await db.warehouse.findUniqueOrThrow({ where: { id: f.warehouseId } })).code;
+    68→
+    69→    const customer = await db.customer.create({ data: { code: uniqueCode('CU'), nameFa: 'مشتری گزارش' } });
+    70→    customerId = customer.id;
+    71→
+    72→    // machines: PNT-501 has capability for the paint op; CUT-201 has none for blanking
+    73→    machineCapId = (await db.machine.findUniqueOrThrow({ where: { code: 'PNT-501' } })).id;
+    74→    machineNoCapId = (await db.machine.findUniqueOrThrow({ where: { code: 'CUT-201' } })).id;
+    75→
+    76→    // BOM: 2 kg of fixture material per finished part
+    77→    await db.partMaterialRequirement.create({
+    78→      data: { partId: f.partId, materialId: f.materialId, quantityPerUnit: 2, weightKgPerUnit: 2, notes: 'داده آزمون گزارش' },
+    79→    });
+    80→
+    81→    // part 2 — will be produced WITHOUT any BOM row (missing standard must be surfaced)
+    82→    const part2 = await db.part.create({
+    83→      data: { partNumber: uniqueCode('PT'), nameFa: 'قطعه بدون BOM', partType: 'FINISHED_PART', baseUnitId: unitPcs.id },
+    84→    });
+    85→    part2Id = part2.id;
+    86→
+    87→    // ---- customer orders (real planning-module service)
+    88→    const order = await createCustomerOrder(
+    89→      { customerId, orderDate: iso(0), lines: [{ partId: f.partId, quantity: 100, dueDate: iso(10) }] },
+    90→      f.adminId,
+    91→      {},
+    92→    );
+    93→    lineId = order.lines[0]!.id;
+    94→    const orderOverdue = await createCustomerOrder(
+    95→      { customerId, orderDate: iso(-9), lines: [{ partId: f.partId, quantity: 30, dueDate: iso(-5) }] },
+    96→      f.adminId,
+    97→      {},
+    98→    );
+    99→    lineOverdueId = orderOverdue.lines[0]!.id;
+   100→
+   101→    // ---- plan + plan line (fixture), MO linked through planLineId
+   102→    const plan = await db.productionPlan.create({
+   103→      data: {
+   104→        planNumber: uniqueCode('PL'), title: 'برنامه آزمون گزارش',
+   105→        periodStart: new Date(), periodEnd: new Date(Date.now() + 7 * 86_400_000),
+   106→        status: 'CONFIRMED', createdById: f.adminId, confirmedAt: new Date(),
+   107→      },
+   108→    });
+   109→    const planLine = await db.productionPlanLine.create({
+   110→      data: { planId: plan.id, lineNo: 1, partId: f.partId, plannedQuantity: 200, customerOrderLineId: lineId, grossQuantity: 200 },
+   111→    });
+   112→
+   113→    // ---- MO #1 (200 pcs, full 3-op chain, ending with 60 pcs in FG)
+   114→    const mo = await createManufacturingOrder(
+   115→      { partId: f.partId, quantity: 200, routeId: f.routeId, dueDate: iso(7), planLineId: planLine.id },
+   116→      f.adminId,
+   117→      {},
+   118→    );
+   119→    moId = mo.id;
+   120→    moOps = mo.operations.map((o) => ({ id: o.id, sequence: o.sequence }));
+   121→    await releaseManufacturingOrder(moId, f.adminId, {});
+   122→
+   123→    const feed = await createProductionTransfer({ partId: f.partId, fromWarehouseId: f.warehouseId, toOperationId: moOps[0]!.id, quantity: 210, transferDate: f.today }, f.adminId, {});
+   124→    await postProductionTransfer(feed.id, f.adminId, {});
+   125→    const r1 = await createProductionReport({ operationId: moOps[0]!.id, reportDate: f.today, inputQuantity: 210, producedQuantity: 206, machineId: (await db.machine.findUniqueOrThrow({ where: { code: 'PRES-101' } })).id, scraps: [{ reason: 'SETUP_WASTE', quantity: 4 }] }, f.adminId, {});
+   126→    await confirmProductionReport(r1.id, f.adminId, {});
+   127→    const t12 = await createProductionTransfer({ partId: f.partId, fromOperationId: moOps[0]!.id, toOperationId: moOps[1]!.id, quantity: 206, transferDate: f.today }, f.adminId, {});
+   128→    await postProductionTransfer(t12.id, f.adminId, {});
+   129→    const r2 = await createProductionReport({ operationId: moOps[1]!.id, reportDate: f.today, inputQuantity: 206, producedQuantity: 204, machineId: (await db.machine.findUniqueOrThrow({ where: { code: 'PRES-102' } })).id, scraps: [{ reason: 'SETUP_WASTE', quantity: 2 }] }, f.adminId, {});
+   130→    await confirmProductionReport(r2.id, f.adminId, {});
+   131→    const t23 = await createProductionTransfer({ partId: f.partId, fromOperationId: moOps[1]!.id, toOperationId: moOps[2]!.id, quantity: 204, transferDate: f.today }, f.adminId, {});
+   132→    await postProductionTransfer(t23.id, f.adminId, {});
+   133→    const r3 = await createProductionReport({ operationId: moOps[2]!.id, reportDate: f.today, inputQuantity: 64, producedQuantity: 60, machineId: machineCapId, scraps: [{ reason: 'SETUP_WASTE', quantity: 4 }] }, f.adminId, {});
+   134→    await confirmProductionReport(r3.id, f.adminId, {});
+   135→
+   136→    // FG receipt: 60 finished parts into the finished-goods warehouse
+   137→    const fg = await createProductionTransfer({ partId: f.partId, fromOperationId: moOps[2]!.id, toWarehouseId: f.whOtherId, quantity: 60, transferDate: f.today }, f.adminId, {});
+   138→    await postProductionTransfer(fg.id, f.adminId, {});
+   139→
+   140→    // ---- MO #2 (50 pcs, overdue, reported on a machine WITHOUT the capability)
+   141→    const mo2 = await createManufacturingOrder({ partId: f.partId, quantity: 50, routeId: f.routeId, dueDate: iso(-5) }, f.adminId, {});
+   142→    mo2Id = mo2.id;
+   143→    await releaseManufacturingOrder(mo2Id, f.adminId, {});
+   144→    const feed2 = await createProductionTransfer({ partId: f.partId, fromWarehouseId: f.warehouseId, toOperationId: mo2.operations[0]!.id, quantity: 52, transferDate: f.today }, f.adminId, {});
+   145→    await postProductionTransfer(feed2.id, f.adminId, {});
+   146→    const r4 = await createProductionReport({ operationId: mo2.operations[0]!.id, reportDate: f.today, inputQuantity: 52, producedQuantity: 50, machineId: machineNoCapId, scraps: [{ reason: 'SETUP_WASTE', quantity: 2 }] }, f.adminId, {});
+   147→    await confirmProductionReport(r4.id, f.adminId, {});
+   148→
+   149→    // ---- machine assignments (one fully dated, one missing plannedEnd)
+   150→    await db.machineAssignment.create({
+   151→      data: { operationId: moOps[2]!.id, machineId: machineCapId, plannedStart: new Date(Date.now() - 2 * 3_600_000), plannedEnd: new Date(), status: 'ACTIVE' },
+   152→    });
+   153→    await db.machineAssignment.create({
+   154→      data: { operationId: mo2.operations[0]!.id, machineId: machineNoCapId, plannedStart: new Date(Date.now() - 3_600_000), status: 'PLANNED' },
+   155→    });
+   156→
+   157→    // ---- material: receipt 500 kg owned + 50 kg consignment, issue 100 kg
+   158→    const rec1 = await createDocument(
+   159→      { documentType: 'RECEIPT', documentDate: f.today, warehouseId: f.warehouseId, lines: [{ materialId: f.materialId, lotNumber: uniqueCode('LOT'), quantity: 500, weightKg: 500 }] },
+   160→      f.adminId, {},
+   161→    );
+   162→    await postDocument(rec1.id, f.adminId, {});
+   163→    // the lot is created at posting time — fetch it for the issue line
+   164→    lotOwnedId = (await db.materialLot.findFirstOrThrow({ where: { materialId: f.materialId, ownership: 'OWNED' } })).id;
+   165→    const rec2 = await createDocument(
+   166→      { documentType: 'RECEIPT', documentDate: f.today, warehouseId: f.warehouseId, lines: [{ materialId: f.materialId, lotNumber: uniqueCode('LOT'), quantity: 50, weightKg: 50, ownership: 'SUPPLIER_CONSIGNMENT' }] },
+   167→      f.adminId, {},
+   168→    );
+   169→    await postDocument(rec2.id, f.adminId, {});
+   170→    const iss = await createDocument(
+   171→      { documentType: 'PRODUCTION_ISSUE', documentDate: f.today, warehouseId: f.warehouseId, referenceType: 'MANUFACTURING_ORDER', referenceId: moId, lines: [{ materialId: f.materialId, lotId: lotOwnedId, quantity: 100, weightKg: 100 }] },
+   172→      f.adminId, {},
+   173→    );
+   174→    await postDocument(iss.id, f.adminId, {});
+   175→
+   176→    // ---- delivered quantity is a real order-line field (40 of 100 delivered)
+   177→    await db.customerOrderLine.update({ where: { id: lineId }, data: { deliveredQuantity: 40 } });
+   178→
+   179→    // ---- finished goods seed for the backlog coverage check
+   180→    await db.stockBalance.upsert({
+   181→      where: { balanceKey: `${f.partId}:-:${f.whOtherId}:-:-:${unitPcs.id}:OWNED:APPROVED` },
+   182→      create: { balanceKey: `${f.partId}:-:${f.whOtherId}:-:-:${unitPcs.id}:OWNED:APPROVED`, partId: f.partId, warehouseId: f.whOtherId, unitId: unitPcs.id, quantity: 300, weightKg: 0 },
+   183→      update: { quantity: { increment: 300 } },
+   184→    });
+   185→
+   186→    void unitKg;
+   187→  });
+   188→
+   189→  // -----------------------------------------------------------------
+   190→  it('plan-vs-actual: actual equals posted production reports of the final operation (reconciliation)', async () => {
+   191→    const report = await planVsActual({ customerId });
+   192→    const line = await db.productionPlanLine.findFirstOrThrow({ where: { partId: f.partId, plan: { title: 'برنامه آزمون گزارش' } }, include: { plan: true } });
+   193→    const row2 = report.rows.find((r) => (r.lineNo as number) === line.lineNo && String(r.planNumber) === line.plan.planNumber)!;
+   194→    expect(row2).toBeTruthy();
+   195→    expect(d(row2.plannedQuantity as string)).toBe(200);
+   196→    expect(d(row2.moCreatedQuantity as string)).toBe(200);
+   197→    expect(d(row2.actualQuantity as string)).toBe(60);
+   198→
+   199→    // raw reconciliation: sum of POSTED reports on the final operation
+   200→    const finalOp = await db.productionOperation.findFirstOrThrow({ where: { manufacturingOrderId: moId, sequence: 3 } });
+   201→    const raw = await db.productionReport.aggregate({ _sum: { producedQuantity: true }, where: { operationId: finalOp.id, postingStatus: 'POSTED' } });
+   202→    expect(d(raw._sum.producedQuantity)).toBe(60);
+   203→    expect(d(row2.actualQuantity as string)).toBe(d(raw._sum.producedQuantity));
+   204→    expect(d(row2.variance as string)).toBeCloseTo(-140, 5);
+   205→  });
+   206→
+   207→  it('order-fulfillment: ordered/delivered/open match real order-line fields, overdue flagged', async () => {
+   208→    const report = await orderFulfillment({ customerId });
+   209→    const row = report.rows.find((r) => r._drill && (r._drill as { id: string }).id === lineId)!;
+   210→    expect(d(row.orderedQuantity as string)).toBe(100);
+   211→    expect(d(row.deliveredQuantity as string)).toBe(40);
+   212→    expect(d(row.openQuantity as string)).toBe(60);
+   213→    expect(row.overdue).toBe(false);
+   214→
+   215→    const rowOverdue = report.rows.find((r) => r._drill && (r._drill as { id: string }).id === lineOverdueId)!;
+   216→    expect(d(rowOverdue.openQuantity as string)).toBe(30);
+   217→    expect(rowOverdue.overdue).toBe(true);
+   218→  });
+   219→
+   220→  it('backlog: open demand vs stock + WIP + open MOs reconciles with raw records', async () => {
+   221→    const report = await backlog({ partId: f.partId });
+   222→    expect(report.rows).toHaveLength(1);
+   223→    const row = report.rows[0]!;
+   224→    // open orders: 60 (delivered 40 of 100) + 30 overdue = 90
+   225→    expect(d(row.openOrderQuantity as string)).toBe(90);
+   226→    // open MOs: 200 + 50
+   227→    expect(d(row.openMoQuantity as string)).toBe(250);
+   228→    // WIP: mo#1 op3 = 204 − 60 − 4 = 140; mo#2 op1 = 52 − 0 − 2 = 50 → 190
+   229→    expect(d(row.wipQuantity as string)).toBe(190);
+   230→    // FG usable: 300 seeded + 60 FG receipt = 360
+   231→    expect(d(row.finishedGoodsUsable as string)).toBe(360);
+   232→    expect(d(row.coverageQuantity as string)).toBe(800);
+   233→    expect(d(row.uncoveredBacklog as string)).toBe(-710);
+   234→    expect(row.coveredFully).toBe(true);
+   235→
+   236→    // cross-check WIP against productionOperation aggregates (reconciliation)
+   237→    const ops = await db.productionOperation.findMany({ where: { manufacturingOrder: { partId: f.partId, status: { in: ['RELEASED', 'IN_PROGRESS'] } } } });
+   238→    const wipRaw = ops.reduce((acc, op) => acc + d(op.receivedQuantity) - d(op.transferredOutQuantity) - d(op.scrappedQuantity) - d(op.rejectedQuantity), 0);
+   239→    expect(d(row.wipQuantity as string)).toBe(wipRaw);
+   240→  });
+   241→
+   242→  it('wip-by-part-operation: conservation (waiting+processing+ready = total) and raw match', async () => {
+   243→    const report = await wipByPartOperation({ partId: f.partId });
+   244→    const pnt = report.rows.find((r) => String(r.part).startsWith(partNumber) && String(r.operation).startsWith('PNT'))!;
+   245→    expect(d(pnt.wipTotal as string)).toBe(140);
+   246→    expect(d(pnt.waitingToProcess as string)).toBe(140);
+   247→    expect(d(pnt.readyForTransfer as string)).toBe(0);
+   248→    // conservation check column equals wipTotal
+   249→    expect(d(pnt.conservationCheck as string)).toBe(d(pnt.wipTotal as string));
+   250→
+   251→    const blk = report.rows.find((r) => String(r.part).startsWith(partNumber) && String(r.operation).startsWith('BLK'))!;
+   252→    // mo#1 op1 fully transferred (0) + mo#2 op1: 50 produced ready for transfer
+   253→    expect(d(blk.wipTotal as string)).toBe(50);
+   254→    expect(d(blk.readyForTransfer as string)).toBe(50);
+   255→  });
+   256→
+   257→  it('wip-aging: aging hours derived from wipSinceAt, unknown aging flagged explicitly', async () => {
+   258→    const report = await wipAging({ partId: f.partId });
+   259→    const rows = report.rows.filter((r) => d(r.wipTotal as string) > 0);
+   260→    expect(rows.length).toBeGreaterThan(0);
+   261→    for (const r of rows) {
+   262→      expect(r.agingKnown).toBe(true);
+   263→      expect(d(r.agingHours as number)).toBeGreaterThanOrEqual(0);
+   264→    }
+   265→    // summary note lists buckets
+   266→    expect(report.meta.notesFa.some((n) => n.includes('خلاصه سنی'))).toBe(true);
+   267→  });
+   268→
+   269→  it('material-consumption: actual = posted issues, standard = produced × BOM, missing BOM surfaced', async () => {
+   270→    // produce part2 (no BOM) into FG: 5 pcs via production transfer from a temp op —
+   271→    // simpler: a direct PRODUCTION_RECEIPT document (real inventory path)
+   272→    const unitPcs = await db.unitOfMeasure.findUniqueOrThrow({ where: { code: 'PCS' } });
+   273→    const doc = await createDocument(
+   274→      { documentType: 'PRODUCTION_RECEIPT', documentDate: f.today, warehouseId: f.whOtherId, lines: [{ partId: part2Id, quantity: 5, unitId: unitPcs.id }] },
+   275→      f.adminId, {},
+   276→    );
+   277→    await postDocument(doc.id, f.adminId, {});
+   278→
+   279→    const report = await materialConsumption({ from: period.from, to: period.to, materialId: f.materialId });
+   280→    const row = report.rows.find((r) => (r._drill as { id: string } | undefined)?.id === f.materialId)!;
+   281→    expect(d(row.actualConsumedQuantity as string)).toBe(100);
+   282→    expect(d(row.actualConsumedKg as string)).toBe(100);
+   283→    expect(d(row.standardQuantity as string)).toBe(120); // 60 produced × 2 kg
+   284→    expect(d(row.standardKg as string)).toBe(120);
+   285→    expect(d(row.varianceQuantity as string)).toBe(-20);
+   286→    expect(row.standardKnown).toBe(true);
+   287→
+   288→    // missing-BOM part is surfaced in the notes — never silently assumed
+   289→    expect(report.meta.notesFa.some((n) => n.includes('بدون BOM'))).toBe(true);
+   290→
+   291→    // reconciliation against the raw ledger
+   292→    const rawIssue = await db.inventoryTransaction.aggregate({
+   293→      _sum: { weightKg: true },
+   294→      where: { materialId: f.materialId, type: 'ISSUE', occurredAt: { gte: new Date(`${period.from}T00:00:00.000Z`) } },
+   295→    });
+   296→    expect(d(rawIssue._sum.weightKg)).toBe(100);
+   297→  });
+   298→
+   299→  it('sapco-account: opening/receipts/consumption/closing reconcile with the immutable ledger', async () => {
+   300→    const report = await sapcoAccount({ from: period.from, to: period.to, materialId: f.materialId });
+   301→    const row = report.rows.find((r) => String(r.materialId) === f.materialId)!;
+   302→    expect(d(row.openingKg as string)).toBe(0);
+   303→    expect(d(row.receiptsKg as string)).toBe(550); // 500 owned + 50 consignment
+   304→    expect(d(row.consumptionKg as string)).toBe(100);
+   305→    expect(d(row.closingKg as string)).toBe(450);
+   306→    expect(row.closingMatchesLedger).toBe(true);
+   307→    expect(d(row.balanceOwnedKg as string)).toBe(400);
+   308→    expect(d(row.balanceConsignmentKg as string)).toBe(50);
+   309→
+   310→    const ledger = await ledgerSum({ materialId: f.materialId, warehouseId: f.warehouseId, lotId: null });
+   311→    // ledgerSum without lot filter would double count — use explicit per-lot sums
+   312→    const lots = await db.materialLot.findMany({ where: { materialId: f.materialId } });
+   313→    let totalKg = 0;
+   314→    for (const lot of lots) {
+   315→      const s = await ledgerSum({ materialId: f.materialId, warehouseId: f.warehouseId, lotId: lot.id });
+   316→      totalKg += s.weightKg;
+   317→    }
+   318→    expect(d(row.closingKg as string)).toBeCloseTo(totalKg, 5);
+   319→    expect(totalKg).toBe(450);
+   320→    void ledger;
+   321→  });
+   322→
+   323→  it('inventory-valuation: quantities only, no monetary valuation, ownership separated', async () => {
+   324→    const report = await inventoryValuation({ materialId: f.materialId });
+   325→    expect(report.rows.length).toBeGreaterThanOrEqual(2);
+   326→    const owned = report.rows.find((r) => r.ownership === 'OWNED' && String(r.warehouse).startsWith(whCode))!;
+   327→    const consignment = report.rows.find((r) => r.ownership === 'SUPPLIER_CONSIGNMENT' && String(r.warehouse).startsWith(whCode))!;
+   328→    expect(d(owned.quantity as string)).toBe(400);
+   329→    expect(d(consignment.quantity as string)).toBe(50);
+   330→    // no money column exists — quantities and weights only
+   331→    expect(report.columns.some((c) => c.key === 'quantity' && c.kind === 'ACTUAL')).toBe(true);
+   332→    expect(report.columns.some((c) => c.key.toLowerCase().includes('value') || c.key.toLowerCase().includes('amount'))).toBe(false);
+   333→    expect(report.meta.notesFa.some((n) => n.includes('قاعده ارزش‌گذاری مالی'))).toBe(true);
+   334→  });
+   335→
+   336→  it('scrap report: totals equal raw ProductionScrap records (reconciliation)', async () => {
+   337→    const report = await scrapReport({ partId: f.partId });
+   338→    const rows = report.rows.filter((r) => String(r.part).startsWith(partNumber));
+   339→    const total = rows.reduce((acc, r) => acc + d(r.quantity as string), 0);
+   340→    // mo#1: 4+2+4 = 10, mo#2: 2 → 12
+   341→    expect(total).toBe(12);
+   342→    const blk = rows.find((r) => String(r.operation).startsWith('BLK'))!;
+   343→    expect(d(blk.quantity as string)).toBe(6);
+   344→    expect(blk.scrapPctOfInput).not.toBeNull();
+   345→
+   346→    const raw = await db.productionScrap.aggregate({ _sum: { quantity: true }, where: { partId: f.partId } });
+   347→    expect(d(raw._sum.quantity)).toBe(12);
+   348→    expect(total).toBe(d(raw._sum.quantity));
+   349→  });
+   350→
+   351→  it('machine-workload: utilization only where reliable capacity data exists', async () => {
+   352→    const report = await machineWorkload({ ...period, machineId: machineCapId });
+   353→    const row = report.rows.find((r) => String(r.machine).startsWith('PNT-501'))!;
+   354→    expect(row.capacityReliable).toBe(true);
+   355→    expect(row.utilizationPct).not.toBeNull();
+   356→    // 60 pcs ÷ 150/h = 24 standard minutes
+   357→    expect(d(row.standardMinutes as string)).toBeCloseTo(24, 1);
+   358→    expect(d(row.actualProducedQuantity as string)).toBe(60);
+   359→    // assignment had 2h planned window
+   360→    expect(d(row.plannedMinutes as string)).toBe(120);
+   361→    expect(row.plannedAssignmentsMissingDates).toBe(0);
+   362→
+   363→    const noCap = await machineWorkload({ ...period, machineId: machineNoCapId });
+   364→    const rowNoCap = noCap.rows.find((r) => String(r.machine).startsWith('CUT-201'))!;
+   365→    expect(rowNoCap.capacityReliable).toBe(false);
+   366→    expect(rowNoCap.utilizationPct).toBeNull();
+   367→    expect(rowNoCap.reasonFa).toBeTruthy();
+   368→    expect(rowNoCap.plannedAssignmentsMissingDates).toBe(1);
+   369→  });
+   370→
+   371→  it('production-delays: overdue order lines and overdue open MOs from real dates', async () => {
+   372→    const report = await productionDelays({ customerId });
+   373→    const orderRow = report.rows.find((r) => r.section === 'ردیف سفارش باز' && r._drill && (r._drill as { id: string }).id === lineOverdueId)!;
+   374→    expect(orderRow).toBeTruthy();
+   375→    expect(d(orderRow.openQuantity as string)).toBe(30);
+   376→    expect(d(orderRow.daysLate as number)).toBeGreaterThanOrEqual(5);
+   377→
+   378→    const moRow = report.rows.find((r) => r.section === 'دستور کار باز' && r._drill && (r._drill as { id: string }).id === mo2Id)!;
+   379→    expect(moRow).toBeTruthy();
+   380→    expect(d(moRow.daysLate as number)).toBeGreaterThanOrEqual(5);
+   381→  });
+   382→
+   383→  it('inventory-movements: grouped net equals the signed ledger (reconciliation)', async () => {
+   384→    const report = await inventoryMovements({ from: period.from, to: period.to, materialId: f.materialId });
+   385→    const row = report.rows.find((r) => (r._drill as { id: string } | undefined)?.id === `MATERIAL|${f.materialId}|${period.from}|${period.to}`)!;
+   386→    expect(d(row.inKg as string)).toBe(550);
+   387→    expect(d(row.outKg as string)).toBe(100);
+   388→    expect(d(row.netKg as string)).toBe(450);
+   389→
+   390→    const lots = await db.materialLot.findMany({ where: { materialId: f.materialId } });
+   391→    let inSum = 0;
+   392→    let outSum = 0;
+   393→    for (const lot of lots) {
+   394→      const s = await ledgerSum({ materialId: f.materialId, warehouseId: f.warehouseId, lotId: lot.id });
+   395→      if (s.weightKg >= 0) inSum += s.weightKg;
+   396→      else outSum += -s.weightKg;
+   397→    }
+   398→    // per-lot sums are net; recompute gross from raw transactions instead
+   399→    const txs = await db.inventoryTransaction.findMany({ where: { materialId: f.materialId, warehouseId: f.warehouseId } });
+   400→    let grossIn = 0;
+   401→    let grossOut = 0;
+   402→    for (const t of txs) {
+   403→      const w = d(t.weightKg);
+   404→      if (['RECEIPT', 'TRANSFER_IN', 'ADJUSTMENT_IN'].includes(t.type)) grossIn += w;
+   405→      else grossOut += w;
+   406→    }
+   407→    expect(grossIn).toBe(550);
+   408→    expect(grossOut).toBe(100);
+   409→    expect(grossIn - grossOut).toBe(d(row.netKg as string));
+   410→    void inSum;
+   411→    void outSum;
+   412→  });
+   413→
+   414→  it('inventory-reconciliation: ledger-backed dimensions MATCH, drifted balance flagged', async () => {
+   415→    const report = await inventoryReconciliation({ materialId: f.materialId });
+   416→    expect(report.rows.length).toBeGreaterThanOrEqual(2);
+   417→    for (const r of report.rows) {
+   418→      expect(r.status).toBe('MATCH');
+   419→      expect(Math.abs(d(r.diffKg as string))).toBeLessThan(0.0001);
+   420→    }
+   421→
+   422→    // deliberately drift one balance (test-only manipulation) — must be detected
+   423→    const drifted = await db.stockBalance.findFirstOrThrow({
+   424→      where: { materialId: f.materialId, ownership: 'OWNED', quantity: { gt: 0 } },
+   425→    });
+   426→    await db.stockBalance.update({ where: { id: drifted.id }, data: { quantity: d(drifted.quantity) + 7 } });
+   427→
+   428→    const after = await inventoryReconciliation({ materialId: f.materialId });
+   429→    const flagged = after.rows.find((r) => r.status === 'MISMATCH');
+   430→    expect(flagged).toBeTruthy();
+   431→    expect(d((flagged as Record<string, unknown>).diffQuantity as string)).toBeCloseTo(7, 5);
+   432→
+   433→    // restore for other suites
+   434→    await db.stockBalance.update({ where: { id: drifted.id }, data: { quantity: d(drifted.quantity) } });
+   435→    const restored = await inventoryReconciliation({ materialId: f.materialId });
+   436→    expect(restored.rows.every((r) => r.status === 'MATCH')).toBe(true);
+   437→  });
+   438→
+   439→  it('CSV export: BOM, header block with Jalali timestamp, column labels and data rows', async () => {
+   440→    const report = await scrapReport({ partId: f.partId });
+   441→    const csv = reportToCsv(report);
+   442→    expect(csv.charCodeAt(0)).toBe(0xfeff);
+   443→    expect(csv).toContain('گزارش: ضایعات به تفکیک قطعه و عملیات');
+   444→    expect(csv).toContain('زمان تولید:');
+   445→    expect(csv).toContain('فیلترها:');
+   446→    expect(csv).toContain('مقدار ضایعات');
+   447→    const dataRows = csv.trim().split('\r\n').length - 5; // 3 header lines + blank + column header
+   448→    expect(dataRows).toBe(report.rows.length);
+   449→  });
+   450→
+   451→  it('drill-down: summary rows resolve to source documents', async () => {
+   452→    // plan_line → linked MOs
+   453→    const line = await db.productionPlanLine.findFirstOrThrow({ where: { partId: f.partId, plan: { title: 'برنامه آزمون گزارش' } } });
+   454→    const dd1 = await drillDown('plan_line', line.id, {});
+   455→    expect(dd1.rows.some((r) => r.source === 'دستور کار مرتبط' && d(r.quantity as string) === 200)).toBe(true);
+   456→    expect(dd1.meta.notesFa.some((n) => n.includes('/production-planning/plans/'))).toBe(true);
+   457→
+   458→    // wip_operation → production reports of that operation
+   459→    const pntOp = await db.productionOperation.findFirstOrThrow({ where: { id: moOps[2]!.id } });
+   460→    const dd2 = await drillDown('wip_operation', pntOp.id, {});
+   461→    expect(dd2.rows.some((r) => r.source === 'گزارش تولید')).toBe(true);
+   462→
+   463→    // inventory_balance → ledger transactions of the balance dimension
+   464→    const bal = await db.stockBalance.findFirstOrThrow({ where: { materialId: f.materialId, ownership: 'OWNED', quantity: { gt: 0 } } });
+   465→    const dd3 = await drillDown('inventory_balance', bal.id, {});
+   466→    expect(dd3.rows.length).toBeGreaterThan(0);
+   467→
+   468→    // movement_group → transactions of the material in the period
+   469→    const dd4 = await drillDown('movement_group', `MATERIAL|${f.materialId}|${period.from}|${period.to}`, {});
+   470→    expect(dd4.rows.length).toBeGreaterThanOrEqual(3);
+   471→
+   472→    // unknown kind → 400
+   473→    await expect(drillDown('bogus_kind', f.partId, {})).rejects.toThrow();
+   474→  });
+   475→
+   476→  it('operations dashboard: 9 KPI groups from real records with explicit value kinds', async () => {
+   477→    const dash = await getOperationsDashboard();
+   478→    const k = dash.kpis;
+   479→    expect(k.activeCustomerOrders.count).toBeGreaterThanOrEqual(2);
+   480→    expect(d(k.activeCustomerOrders.openQuantity)).toBeGreaterThan(0);
+   481→    expect(k.plannedProduction.valueKind).toBe('PLANNED');
+   482→    expect(d(k.plannedProduction.quantity)).toBeGreaterThanOrEqual(200);
+   483→    expect(k.actualProduction.valueKind).toBe('ACTUAL');
+   484→    // actual production (30d) ≥ our posted reports: 206+204+60+50 = 520 for this fixture
+   485→    expect(d(k.actualProduction.quantity)).toBeGreaterThanOrEqual(520);
+   486→    expect(k.delayedOrders.lineCount).toBeGreaterThanOrEqual(1);
+   487→    expect(k.wipQuantity.valueKind).toBe('ACTUAL');
+   488→    expect(d(k.wipQuantity.quantity)).toBeGreaterThanOrEqual(140);
+   489→    expect(d(k.finishedGoodsStock.owned)).toBeGreaterThan(0);
+   490→    expect(d(k.scrap.quantity)).toBeGreaterThanOrEqual(12);
+   491→    expect(k.machineUtilization.valueKind).toBe('ESTIMATED');
+   492→    // utilization only where reliable — PNT-501 is reliable in this fixture
+   493→    const pnt = k.machineUtilization.machines.find((m) => m.machineCode === 'PNT-501');
+   494→    expect(pnt?.capacityReliable).toBe(true);
+   495→    expect(pnt?.utilizationPct).not.toBeNull();
+   496→    const cut = k.machineUtilization.machines.find((m) => m.machineCode === 'CUT-201');
+   497→    expect(cut?.capacityReliable).toBe(false);
+   498→    expect(cut?.reasonFa).toBeTruthy();
+   499→    expect(dash.generatedAt).toBeTruthy();
+   500→    expect(dash.generatedAtFa).toBeTruthy();
+   501→  });
+   502→});
+   503→
