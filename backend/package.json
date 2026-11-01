@@ -1,0 +1,36 @@
+{
+  "name": "kpims-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KPIMS REST API — Express + Prisma + PostgreSQL",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "prisma": "prisma"
+  },
+  "prisma": {
+    "seed": "./node_modules/.bin/tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.16.2",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "prisma": "^6.16.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.3.1"
+  }
+}

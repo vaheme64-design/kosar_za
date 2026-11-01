@@ -1,0 +1,29 @@
+{
+  "name": "kpims",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KPIMS — Kosar Production & Inventory Management System (سامانه برنامه‌ریزی تولید و مدیریت موجودی کوثر)",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "embedded-postgres": "17.11.0-beta.19"
+  },
+  "scripts": {
+    "dev": "bash .zscripts/dev.sh",
+    "db:start": "node scripts/postgres.mjs start",
+    "db:stop": "node scripts/postgres.mjs stop",
+    "db:status": "node scripts/postgres.mjs status",
+    "db:migrate": "node scripts/prisma.mjs migrate dev",
+    "db:deploy": "node scripts/prisma.mjs migrate deploy",
+    "db:seed": "node scripts/prisma.mjs db seed",
+    "db:studio": "node scripts/prisma.mjs studio",
+    "build": "cd backend && npx tsc -p tsconfig.build.json && cd ../frontend && npx vite build",
+    "typecheck": "cd backend && npx tsc --noEmit && cd ../frontend && npx tsc --noEmit",
+    "lint": "npm run typecheck",
+    "docs:dictionary": "node scripts/generate-data-dictionary.mjs"
+  },
+  "trustedDependencies": [
+    "@embedded-postgres/linux-x64"
+  ]
+}

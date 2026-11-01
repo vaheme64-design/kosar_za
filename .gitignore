@@ -1,2 +1,25 @@
-skills/
+# dependencies
 node_modules/
+
+# environment / secrets
+.env
+.env.local
+backend/.env
+frontend/.env.local
+
+# build output
+backend/dist/
+frontend/dist/
+
+# embedded postgres data
+db/
+
+# runtime pids / logs
+.run/
+dev.log
+.zscripts/dev.log
+.zscripts/dev.pid
+
+# misc
+*.log
+.DS_Store

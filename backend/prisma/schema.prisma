@@ -1,0 +1,1264 @@
+// ============================================================================
+// KPIMS — Kosar Production & Inventory Management System
+// سامانه برنامه‌ریزی تولید و مدیریت موجودی کوثر
+//
+// Phase 1 — initial relational schema (PostgreSQL 15+ / Prisma)
+//
+// Conventions:
+//   • Tables/columns are snake_case (via @@map / @map) for ERP-friendly SQL.
+//   • Primary keys are UUID v4 (@db.Uuid).
+//   • All quantities/weights are Decimal (no floating point for inventory).
+//   • Timestamps are stored in UTC (timestamptz); business dates use DATE
+//     and are displayed in the Jalali calendar by the application layer.
+//   • Document status (workflow) and posting status (accounting effect) are
+//     kept separate; posted documents must never be silently edited/deleted
+//     (enforced by FK onDelete: Restrict and future service-layer rules).
+//   • Inventory transactions form an immutable ledger; corrections are made
+//     with reversal documents referencing the original transaction.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UnitKind {
+  COUNT
+  WEIGHT
+  LENGTH
+  AREA
+
+  @@map("unit_kind")
+}
+
+enum MaterialType {
+  SHEET
+  COIL
+  PROFILE
+  PAINT
+  CONSUMABLE
+  OTHER
+
+  @@map("material_type")
+}
+
+enum MaterialStatus {
+  ACTIVE
+  INACTIVE
+
+  @@map("material_status")
+}
+
+enum PartType {
+  FINISHED_PART
+  SEMI_FINISHED
+  SUBASSEMBLY
+
+  @@map("part_type")
+}
+
+enum PartStatus {
+  ACTIVE
+  INACTIVE
+  PHASED_OUT
+
+  @@map("part_status")
+}
+
+enum RouteStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+
+  @@map("route_status")
+}
+
+enum MachineType {
+  PRESS
+  CUTTING
+  PRESS_WELDING
+  CO2_WELDING
+  PAINTING
+  ASSEMBLY
+  OTHER
+
+  @@map("machine_type")
+}
+
+enum MachineStatus {
+  ACTIVE
+  MAINTENANCE
+  BREAKDOWN
+  RETIRED
+
+  @@map("machine_status")
+}
+
+enum DieStatus {
+  ACTIVE
+  MAINTENANCE
+  RETIRED
+
+  @@map("die_status")
+}
+
+enum WarehouseType {
+  RAW_MATERIAL
+  WIP
+  FINISHED_GOODS
+  SCRAP
+  TOOLS
+
+  @@map("warehouse_type")
+}
+
+enum CustomerOrderStatus {
+  DRAFT
+  CONFIRMED
+  IN_PRODUCTION
+  PARTIALLY_DELIVERED
+  DELIVERED
+  CANCELLED
+
+  @@map("customer_order_status")
+}
+
+enum OrderLineStatus {
+  OPEN
+  IN_PRODUCTION
+  COMPLETED
+  CANCELLED
+
+  @@map("order_line_status")
+}
+
+enum PlanStatus {
+  DRAFT
+  CONFIRMED
+  RELEASED
+  CLOSED
+  CANCELLED
+
+  @@map("plan_status")
+}
+
+enum MoPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+
+  @@map("mo_priority")
+}
+
+enum MoStatus {
+  PLANNED
+  RELEASED
+  IN_PROGRESS
+  COMPLETED
+  CLOSED
+  CANCELLED
+
+  @@map("mo_status")
+}
+
+enum OperationStatus {
+  PENDING
+  QUEUED
+  IN_PROGRESS
+  PAUSED
+  COMPLETED
+  CANCELLED
+
+  @@map("operation_status")
+}
+
+enum ReportStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+
+  @@map("report_status")
+}
+
+enum PostingStatus {
+  UNPOSTED
+  POSTED
+  REVERSED
+
+  @@map("posting_status")
+}
+
+enum ScrapReason {
+  MATERIAL_DEFECT
+  DIE_DEFECT
+  MACHINE_FAULT
+  OPERATOR_ERROR
+  QUALITY_REJECT
+  SETUP_WASTE
+  OTHER
+
+  @@map("scrap_reason")
+}
+
+enum TransferStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+
+  @@map("transfer_status")
+}
+
+enum AssignmentStatus {
+  PLANNED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+
+  @@map("assignment_status")
+}
+
+enum InventoryDocType {
+  RECEIPT
+  ISSUE
+  TRANSFER
+  ADJUSTMENT
+  PRODUCTION_RECEIPT
+  PRODUCTION_ISSUE
+  SCRAP_DISPOSAL
+
+  @@map("inventory_doc_type")
+}
+
+enum InventoryDocStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+
+  @@map("inventory_doc_status")
+}
+
+enum InventoryTxType {
+  RECEIPT
+  ISSUE
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+
+  @@map("inventory_tx_type")
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+  EXPIRED
+
+  @@map("reservation_status")
+}
+
+enum LotStatus {
+  OPEN
+  CLOSED
+  BLOCKED
+
+  @@map("lot_status")
+}
+
+enum ContractStatus {
+  OPEN
+  PARTIALLY_RECEIVED
+  COMPLETED
+  CANCELLED
+
+  @@map("contract_status")
+}
+
+enum SequenceResetPolicy {
+  NEVER
+  YEARLY
+
+  @@map("sequence_reset_policy")
+}
+
+enum SettingValueType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+
+  @@map("setting_value_type")
+}
+
+// ============================================================================
+// CONTROL DATA — کاربران، نقش‌ها، مجوزها، حسابرسی، تنظیمات
+// ============================================================================
+
+/// کاربر سامانه
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  username     String    @unique @db.VarChar(64)
+  email        String?   @unique @db.VarChar(190)
+  fullName     String    @map("full_name") @db.VarChar(190)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  isActive     Boolean   @default(true) @map("is_active")
+  roleId       String    @map("role_id") @db.Uuid
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  role                       Role                  @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  auditLogs                  AuditLog[]
+  createdPlans               ProductionPlan[]      @relation("PlanCreatedBy")
+  confirmedPlans             ProductionPlan[]      @relation("PlanConfirmedBy")
+  createdInventoryDocuments  InventoryDocument[]   @relation("InvDocCreatedBy")
+  postedInventoryDocuments   InventoryDocument[]   @relation("InvDocPostedBy")
+  createdTransactions        InventoryTransaction[] @relation("InvTxCreatedBy")
+  operatedReports            ProductionReport[]    @relation("ReportOperator")
+
+  @@index([roleId])
+  @@map("users")
+}
+
+/// نقش کاربری
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique @db.VarChar(64)
+  nameFa      String   @map("name_fa") @db.VarChar(190)
+  description String?  @db.VarChar(500)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users           User[]
+  rolePermissions RolePermission[]
+
+  @@map("roles")
+}
+
+/// مجوز (ماژول + عملیات)
+model Permission {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique @db.VarChar(100) // e.g. "inventory.post"
+  module      String  @db.VarChar(64)
+  action      String  @db.VarChar(64)
+  description String? @db.VarChar(500)
+
+  rolePermissions RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+/// رابط نقش–مجوز
+model RolePermission {
+  roleId       String   @map("role_id") @db.Uuid
+  permissionId String   @map("permission_id") @db.Uuid
+  assignedAt   DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+/// لاگ حسابرسی (فقط درج — توسط سرویس‌ها نوشته می‌شود)
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  action     String   @db.VarChar(64) // LOGIN, LOGIN_FAILED, LOGOUT, CREATE, UPDATE, POST, REVERSE, ...
+  entityType String?  @map("entity_type") @db.VarChar(64)
+  entityId   String?  @map("entity_id") @db.VarChar(64)
+  changes    Json?    // { before: ..., after: ... }
+  ipAddress  String?  @map("ip_address") @db.VarChar(45)
+  userAgent  String?  @map("user_agent") @db.VarChar(500)
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([occurredAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+/// دنباله شماره‌گذاری اسناد (شماره سند یکتا)
+model DocumentSequence {
+  id            String              @id @default(uuid()) @db.Uuid
+  key           String              @unique @db.VarChar(32) // INV, MO, PP, CO, PR, TRF
+  title         String?             @db.VarChar(190)
+  prefix        String              @db.VarChar(16)
+  nextNumber    Int                 @default(1) @map("next_number")
+  padLength     Int                 @default(6) @map("pad_length")
+  resetPolicy   SequenceResetPolicy @default(NEVER) @map("reset_policy")
+  lastResetYear Int?                @map("last_reset_year")
+  updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("document_sequences")
+}
+
+/// تنظیمات سامانه
+model SystemSetting {
+  id          String           @id @default(uuid()) @db.Uuid
+  key         String           @unique @db.VarChar(100)
+  value       String           @db.Text
+  valueType   SettingValueType @default(STRING) @map("value_type")
+  description String?          @db.VarChar(500)
+  isSecret    Boolean          @default(false) @map("is_secret")
+  updatedAt   DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("system_settings")
+}
+
+// ============================================================================
+// MASTER DATA — اطلاعات پایه
+// ============================================================================
+
+/// واحد شمارش
+model UnitOfMeasure {
+  id     String   @id @default(uuid()) @db.Uuid
+  code   String   @unique @db.VarChar(16) // PCS, KG, M, M2, SHEET
+  nameFa String   @map("name_fa") @db.VarChar(190)
+  nameEn String   @map("name_en") @db.VarChar(190)
+  kind   UnitKind @default(COUNT)
+  isActive Boolean @default(true) @map("is_active")
+
+  parts          Part[]
+  materials      Material[]
+  documentLines  InventoryDocumentLine[]
+  transactions   InventoryTransaction[]
+  reservations   InventoryReservation[]
+
+  @@map("units_of_measure")
+}
+
+/// ماده اولیه (ورق، رنگ و ...) — تأمین‌کننده اصلی: SAPCO
+model Material {
+  id            String         @id @default(uuid()) @db.Uuid
+  materialCode  String         @unique @map("material_code") @db.VarChar(64)
+  nameFa        String         @map("name_fa") @db.VarChar(190)
+  nameEn        String?        @map("name_en") @db.VarChar(190)
+  materialType  MaterialType   @default(SHEET) @map("material_type")
+  grade         String?        @db.VarChar(64) // ST12, ST37, ...
+  thicknessMm   Decimal?       @map("thickness_mm") @db.Decimal(10, 3)
+  widthMm       Decimal?       @map("width_mm") @db.Decimal(10, 2)
+  lengthMm      Decimal?       @map("length_mm") @db.Decimal(10, 2)
+  unitWeightKg  Decimal?       @map("unit_weight_kg") @db.Decimal(18, 4)
+  baseUnitId    String         @map("base_unit_id") @db.Uuid
+  supplierName  String         @default("SAPCO") @map("supplier_name") @db.VarChar(190)
+  status        MaterialStatus @default(ACTIVE)
+  notes         String?        @db.Text
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  baseUnit       UnitOfMeasure            @relation(fields: [baseUnitId], references: [id], onDelete: Restrict)
+  parts          Part[]                   @relation("PartMainMaterial")
+  lots           MaterialLot[]
+  contracts      MaterialContract[]
+  documentLines  InventoryDocumentLine[]
+  transactions   InventoryTransaction[]
+  reservations   InventoryReservation[]
+  balances       StockBalance[]
+
+  @@index([materialType])
+  @@index([supplierName])
+  @@map("materials")
+}
+
+/// قطعه (محصول)
+model Part {
+  id                String     @id @default(uuid()) @db.Uuid
+  partNumber        String     @unique @map("part_number") @db.VarChar(64)
+  nameFa            String     @map("name_fa") @db.VarChar(190)
+  nameEn            String?    @map("name_en") @db.VarChar(190)
+  partType          PartType   @default(FINISHED_PART) @map("part_type")
+  status            PartStatus @default(ACTIVE)
+  baseUnitId        String     @map("base_unit_id") @db.Uuid
+  standardWeightKg  Decimal?   @map("standard_weight_kg") @db.Decimal(18, 4)
+  mainMaterialId    String?    @map("main_material_id") @db.Uuid
+  primaryCustomerId String?    @map("primary_customer_id") @db.Uuid
+  description       String?    @db.Text
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  baseUnit           UnitOfMeasure          @relation(fields: [baseUnitId], references: [id], onDelete: Restrict)
+  mainMaterial       Material?              @relation("PartMainMaterial", fields: [mainMaterialId], references: [id], onDelete: SetNull)
+  primaryCustomer    Customer?              @relation(fields: [primaryCustomerId], references: [id], onDelete: SetNull)
+  routes             PartRoute[]
+  orderLines         CustomerOrderLine[]
+  planLines          ProductionPlanLine[]
+  manufacturingOrders ManufacturingOrder[]
+  scraps             ProductionScrap[]
+  transfers          ProductionTransfer[]
+  reservations       InventoryReservation[]
+  transactions       InventoryTransaction[]
+  documentLines      InventoryDocumentLine[]
+  balances           StockBalance[]
+
+  @@index([partType])
+  @@index([status])
+  @@index([mainMaterialId])
+  @@index([primaryCustomerId])
+  @@map("parts")
+}
+
+/// مشتری
+model Customer {
+  id            String   @id @default(uuid()) @db.Uuid
+  code          String   @unique @db.VarChar(32)
+  nameFa        String   @map("name_fa") @db.VarChar(190)
+  nameEn        String?  @map("name_en") @db.VarChar(190)
+  contactPerson String?  @map("contact_person") @db.VarChar(190)
+  phone         String?  @db.VarChar(32)
+  email         String?  @db.VarChar(190)
+  address       String?  @db.Text
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  orders CustomerOrder[]
+  parts  Part[]
+
+  @@index([isActive])
+  @@map("customers")
+}
+
+/// عملیات تولید (برش، خالی‌بری، خم، پرس/فرم، جوش پرس، جوش CO2، رنگ، مونتاژ)
+model Operation {
+  id                  String    @id @default(uuid()) @db.Uuid
+  code                String    @unique @db.VarChar(16) // CUT, BLK, BND, FRM, PRW, COW, PNT, ASM
+  nameFa              String    @map("name_fa") @db.VarChar(190)
+  nameEn              String    @map("name_en") @db.VarChar(190)
+  description         String?   @db.Text
+  defaultSetupTimeMin Int?      @map("default_setup_time_min")
+  defaultCycleTimeSec Decimal?  @map("default_cycle_time_sec") @db.Decimal(10, 2)
+  isActive            Boolean   @default(true) @map("is_active")
+
+  routeSteps          PartRouteStep[]
+  capabilities        MachineCapability[]
+  productionOperations ProductionOperation[]
+
+  @@map("operations")
+}
+
+/// مسیر تولید قطعه — با نسخه‌بندی (rule 10)
+model PartRoute {
+  id             String      @id @default(uuid()) @db.Uuid
+  partId         String      @map("part_id") @db.Uuid
+  version        Int
+  name           String?     @db.VarChar(190)
+  status         RouteStatus @default(DRAFT)
+  description    String?     @db.Text
+  effectiveFrom  DateTime?   @map("effective_from") @db.Date
+  supersededById String?     @unique @map("superseded_by_id") @db.Uuid
+  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  part        Part                @relation(fields: [partId], references: [id], onDelete: Restrict)
+  supersededBy PartRoute?         @relation("RouteSupersededBy", fields: [supersededById], references: [id], onDelete: SetNull)
+  supersedes  PartRoute?          @relation("RouteSupersededBy")
+  steps       PartRouteStep[]
+  manufacturingOrders ManufacturingOrder[]
+
+  @@unique([partId, version])
+  @@index([partId])
+  @@index([status])
+  @@map("part_routes")
+}
+
+/// مرحله مسیر تولید
+model PartRouteStep {
+  id             String   @id @default(uuid()) @db.Uuid
+  routeId        String   @map("route_id") @db.Uuid
+  sequence       Int
+  operationId    String   @map("operation_id") @db.Uuid
+  machineId      String?  @map("machine_id") @db.Uuid
+  dieId          String?  @map("die_id") @db.Uuid
+  setupTimeMin   Int?     @map("setup_time_min")
+  cycleTimeSec   Decimal? @map("cycle_time_sec") @db.Decimal(10, 2)
+  scrapFactorPct Decimal  @default(0) @map("scrap_factor_pct") @db.Decimal(5, 2)
+  description    String?  @db.Text
+
+  route     PartRoute @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  operation Operation @relation(fields: [operationId], references: [id], onDelete: Restrict)
+  machine   Machine?  @relation(fields: [machineId], references: [id], onDelete: SetNull)
+  die       Die?      @relation(fields: [dieId], references: [id], onDelete: SetNull)
+
+  productionOperations ProductionOperation[]
+
+  @@unique([routeId, sequence])
+  @@index([operationId])
+  @@index([machineId])
+  @@index([dieId])
+  @@map("part_route_steps")
+}
+
+/// ماشین / ایستگاه
+model Machine {
+  id           String        @id @default(uuid()) @db.Uuid
+  code         String        @unique @db.VarChar(32)
+  nameFa       String        @map("name_fa") @db.VarChar(190)
+  nameEn       String?       @map("name_en") @db.VarChar(190)
+  machineType  MachineType                   @map("machine_type")
+  tonnage      Decimal?      @db.Decimal(10, 2)
+  manufacturer String?       @db.VarChar(190)
+  location     String?       @db.VarChar(190)
+  status       MachineStatus @default(ACTIVE)
+  notes        String?       @db.Text
+  createdAt    DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  capabilities       MachineCapability[]
+  routeSteps         PartRouteStep[]
+  dieCompatibilities MachineDieCompatibility[]
+  assignments        MachineAssignment[]
+  productionOperations ProductionOperation[]
+  reports            ProductionReport[]
+
+  @@index([machineType])
+  @@index([status])
+  @@map("machines")
+}
+
+/// توانایی ماشین برای انجام یک عملیات
+model MachineCapability {
+  machineId           String   @map("machine_id") @db.Uuid
+  operationId         String   @map("operation_id") @db.Uuid
+  standardRatePerHour Decimal? @map("standard_rate_per_hour") @db.Decimal(10, 2)
+  notes               String?  @db.VarChar(500)
+
+  machine   Machine   @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  operation Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+
+  @@id([machineId, operationId])
+  @@index([operationId])
+  @@map("machine_capabilities")
+}
+
+/// قالب
+model Die {
+  id              String    @id @default(uuid()) @db.Uuid
+  code            String    @unique @db.VarChar(32)
+  nameFa          String    @map("name_fa") @db.VarChar(190)
+  description     String?   @db.Text
+  status          DieStatus @default(ACTIVE)
+  storageLocation String?   @map("storage_location") @db.VarChar(190)
+  notes           String?   @db.Text
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  dieCompatibilities MachineDieCompatibility[]
+  routeSteps         PartRouteStep[]
+  assignments        MachineAssignment[]
+  reports            ProductionReport[]
+
+  @@map("dies")
+}
+
+/// سازگاری قالب با ماشین
+model MachineDieCompatibility {
+  machineId String  @map("machine_id") @db.Uuid
+  dieId     String  @map("die_id") @db.Uuid
+  notes     String? @db.VarChar(500)
+
+  machine Machine @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  die     Die     @relation(fields: [dieId], references: [id], onDelete: Cascade)
+
+  @@id([machineId, dieId])
+  @@index([dieId])
+  @@map("machine_die_compatibility")
+}
+
+/// انبار
+model Warehouse {
+  id            String        @id @default(uuid()) @db.Uuid
+  code          String        @unique @db.VarChar(16)
+  nameFa        String        @map("name_fa") @db.VarChar(190)
+  warehouseType WarehouseType @map("warehouse_type")
+  isActive      Boolean       @default(true) @map("is_active")
+  notes         String?       @db.Text
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  locations                   WarehouseLocation[]
+  documents                   InventoryDocument[]
+  transactions                InventoryTransaction[]
+  balances                    StockBalance[]
+  reservations                InventoryReservation[]
+  outgoingProductionTransfers ProductionTransfer[] @relation("TransferFromWarehouse")
+  incomingProductionTransfers ProductionTransfer[] @relation("TransferToWarehouse")
+
+  @@map("warehouses")
+}
+
+/// موقعیت مکانی در انبار
+model WarehouseLocation {
+  id          String  @id @default(uuid()) @db.Uuid
+  warehouseId String  @map("warehouse_id") @db.Uuid
+  code        String  @db.VarChar(32)
+  nameFa      String  @map("name_fa") @db.VarChar(190)
+  capacityKg  Decimal? @map("capacity_kg") @db.Decimal(18, 2)
+  isActive    Boolean @default(true) @map("is_active")
+
+  warehouse        Warehouse               @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  documentLinesFrom InventoryDocumentLine[] @relation("DocLineFromLocation")
+  documentLinesTo   InventoryDocumentLine[] @relation("DocLineToLocation")
+  transactions      InventoryTransaction[]  @relation("TxLocation")
+  balances          StockBalance[]          @relation("BalanceLocation")
+
+  @@unique([warehouseId, code])
+  @@map("warehouse_locations")
+}
+
+/// شیفت کاری
+model Shift {
+  id        String  @id @default(uuid()) @db.Uuid
+  code      String  @unique @db.VarChar(16)
+  nameFa    String  @map("name_fa") @db.VarChar(190)
+  startTime String  @map("start_time") @db.VarChar(5) // "06:00"
+  endTime   String  @map("end_time") @db.VarChar(5)
+  isActive  Boolean @default(true) @map("is_active")
+
+  reports     ProductionReport[]
+  assignments MachineAssignment[]
+
+  @@map("shifts")
+}
+
+// ============================================================================
+// PRODUCTION DATA — داده‌های تولید
+// ============================================================================
+
+/// سفارش مشتری (سربرگ)
+model CustomerOrder {
+  id           String             @id @default(uuid()) @db.Uuid
+  orderNumber  String             @unique @map("order_number") @db.VarChar(32)
+  customerId   String             @map("customer_id") @db.Uuid
+  orderDate    DateTime           @map("order_date") @db.Date
+  dueDate      DateTime?          @map("due_date") @db.Date
+  status       CustomerOrderStatus @default(DRAFT)
+  description  String?            @db.Text
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  customer Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lines    CustomerOrderLine[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([orderDate])
+  @@map("customer_orders")
+}
+
+/// ردیف سفارش مشتری
+model CustomerOrderLine {
+  id                String          @id @default(uuid()) @db.Uuid
+  orderId           String          @map("order_id") @db.Uuid
+  lineNo            Int             @map("line_no")
+  partId            String          @map("part_id") @db.Uuid
+  quantity          Decimal         @db.Decimal(18, 4)
+  deliveredQuantity Decimal         @default(0) @map("delivered_quantity") @db.Decimal(18, 4)
+  dueDate           DateTime?       @map("due_date") @db.Date
+  status            OrderLineStatus @default(OPEN)
+  notes             String?         @db.Text
+
+  order CustomerOrder @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  part  Part          @relation(fields: [partId], references: [id], onDelete: Restrict)
+  planLines     ProductionPlanLine[]
+  reservations  InventoryReservation[] @relation("ReservationForOrderLine")
+
+  @@unique([orderId, lineNo])
+  @@index([partId])
+  @@map("customer_order_lines")
+}
+
+/// برنامه تولید (سربرگ)
+model ProductionPlan {
+  id            String     @id @default(uuid()) @db.Uuid
+  planNumber    String     @unique @map("plan_number") @db.VarChar(32)
+  title         String     @db.VarChar(190)
+  periodStart   DateTime   @map("period_start") @db.Date
+  periodEnd     DateTime   @map("period_end") @db.Date
+  status        PlanStatus @default(DRAFT)
+  description   String?    @db.Text
+  createdById   String     @map("created_by_id") @db.Uuid
+  confirmedAt   DateTime?  @map("confirmed_at") @db.Timestamptz(6)
+  confirmedById String?    @map("confirmed_by_id") @db.Uuid
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  createdBy  User @relation("PlanCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  confirmedBy User? @relation("PlanConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+  lines ProductionPlanLine[]
+
+  @@index([status])
+  @@index([periodStart])
+  @@index([createdById])
+  @@map("production_plans")
+}
+
+/// ردیف برنامه تولید
+model ProductionPlanLine {
+  id                  String   @id @default(uuid()) @db.Uuid
+  planId              String   @map("plan_id") @db.Uuid
+  lineNo              Int      @map("line_no")
+  partId              String   @map("part_id") @db.Uuid
+  plannedQuantity     Decimal  @map("planned_quantity") @db.Decimal(18, 4)
+  customerOrderLineId String?  @map("customer_order_line_id") @db.Uuid
+  notes               String?  @db.Text
+
+  plan              ProductionPlan      @relation(fields: [planId], references: [id], onDelete: Cascade)
+  part              Part                @relation(fields: [partId], references: [id], onDelete: Restrict)
+  customerOrderLine CustomerOrderLine?  @relation(fields: [customerOrderLineId], references: [id], onDelete: SetNull)
+  manufacturingOrders ManufacturingOrder[]
+
+  @@unique([planId, lineNo])
+  @@index([partId])
+  @@index([customerOrderLineId])
+  @@map("production_plan_lines")
+}
+
+/// دستور کار ساخت
+model ManufacturingOrder {
+  id          String     @id @default(uuid()) @db.Uuid
+  moNumber    String     @unique @map("mo_number") @db.VarChar(32)
+  partId      String     @map("part_id") @db.Uuid
+  routeId     String?    @map("route_id") @db.Uuid
+  planLineId  String?    @map("plan_line_id") @db.Uuid
+  quantity    Decimal    @db.Decimal(18, 4)
+  dueDate     DateTime?  @map("due_date") @db.Date
+  priority    MoPriority @default(NORMAL)
+  status      MoStatus   @default(PLANNED)
+  releasedAt  DateTime?  @map("released_at") @db.Timestamptz(6)
+  completedAt DateTime?  @map("completed_at") @db.Timestamptz(6)
+  notes       String?    @db.Text
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  part     Part           @relation(fields: [partId], references: [id], onDelete: Restrict)
+  route    PartRoute?     @relation(fields: [routeId], references: [id], onDelete: SetNull)
+  planLine ProductionPlanLine? @relation(fields: [planLineId], references: [id], onDelete: SetNull)
+  operations   ProductionOperation[]
+  reservations InventoryReservation[] @relation("ReservationForMO")
+
+  @@index([partId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([routeId])
+  @@index([planLineId])
+  @@map("manufacturing_orders")
+}
+
+/// عملیات اجرایی یک دستور کار
+model ProductionOperation {
+  id                   String          @id @default(uuid()) @db.Uuid
+  manufacturingOrderId String          @map("manufacturing_order_id") @db.Uuid
+  sequence             Int
+  operationId          String          @map("operation_id") @db.Uuid
+  routeStepId          String?         @map("route_step_id") @db.Uuid
+  machineId            String?         @map("machine_id") @db.Uuid
+  status               OperationStatus @default(PENDING)
+  plannedStart         DateTime?       @map("planned_start") @db.Timestamptz(6)
+  plannedEnd           DateTime?       @map("planned_end") @db.Timestamptz(6)
+  actualStart          DateTime?       @map("actual_start") @db.Timestamptz(6)
+  actualEnd            DateTime?       @map("actual_end") @db.Timestamptz(6)
+  plannedQuantity      Decimal         @map("planned_quantity") @db.Decimal(18, 4)
+  producedQuantity     Decimal         @default(0) @map("produced_quantity") @db.Decimal(18, 4)
+  scrappedQuantity     Decimal         @default(0) @map("scrapped_quantity") @db.Decimal(18, 4)
+  notes                String?         @db.Text
+  createdAt            DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  manufacturingOrder ManufacturingOrder @relation(fields: [manufacturingOrderId], references: [id], onDelete: Restrict)
+  operation          Operation          @relation(fields: [operationId], references: [id], onDelete: Restrict)
+  routeStep          PartRouteStep?     @relation(fields: [routeStepId], references: [id], onDelete: SetNull)
+  machine            Machine?           @relation(fields: [machineId], references: [id], onDelete: SetNull)
+
+  reports          ProductionReport[]
+  scraps           ProductionScrap[]
+  assignments      MachineAssignment[]
+  outgoingTransfers ProductionTransfer[] @relation("TransferFromOperation")
+  incomingTransfers ProductionTransfer[] @relation("TransferToOperation")
+
+  @@unique([manufacturingOrderId, sequence])
+  @@index([operationId])
+  @@index([machineId])
+  @@index([status])
+  @@map("production_operations")
+}
+
+/// گزارش تولید (تولید شیفت/روز) — وضعیت سند و وضعیت قطع‌بوش جدا است
+model ProductionReport {
+  id               String        @id @default(uuid()) @db.Uuid
+  reportNumber     String        @unique @map("report_number") @db.VarChar(32)
+  operationId      String        @map("operation_id") @db.Uuid
+  machineId        String?       @map("machine_id") @db.Uuid
+  dieId            String?       @map("die_id") @db.Uuid
+  shiftId          String?       @map("shift_id") @db.Uuid
+  operatorId       String?       @map("operator_id") @db.Uuid
+  reportDate       DateTime      @map("report_date") @db.Date
+  producedQuantity Decimal       @map("produced_quantity") @db.Decimal(18, 4)
+  reworkQuantity   Decimal       @default(0) @map("rework_quantity") @db.Decimal(18, 4)
+  status           ReportStatus  @default(DRAFT)
+  postingStatus    PostingStatus @default(UNPOSTED) @map("posting_status")
+  postedAt         DateTime?     @map("posted_at") @db.Timestamptz(6)
+  notes            String?       @db.Text
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  operation ProductionOperation @relation(fields: [operationId], references: [id], onDelete: Restrict)
+  machine   Machine?            @relation(fields: [machineId], references: [id], onDelete: SetNull)
+  die       Die?                @relation(fields: [dieId], references: [id], onDelete: SetNull)
+  shift     Shift?              @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  operator  User?               @relation("ReportOperator", fields: [operatorId], references: [id], onDelete: SetNull)
+
+  scraps ProductionScrap[]
+
+  @@index([operationId])
+  @@index([machineId])
+  @@index([reportDate])
+  @@index([postingStatus])
+  @@map("production_reports")
+}
+
+/// ضایعات تولید
+model ProductionScrap {
+  id          String      @id @default(uuid()) @db.Uuid
+  reportId    String?     @map("report_id") @db.Uuid
+  operationId String?     @map("operation_id") @db.Uuid
+  partId      String?     @map("part_id") @db.Uuid
+  reason      ScrapReason
+  quantity    Decimal     @db.Decimal(18, 4)
+  weightKg    Decimal?    @map("weight_kg") @db.Decimal(18, 4)
+  description String?     @db.Text
+  scrapDate   DateTime    @map("scrap_date") @db.Date
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  report    ProductionReport?   @relation(fields: [reportId], references: [id], onDelete: Restrict)
+  operation ProductionOperation? @relation(fields: [operationId], references: [id], onDelete: Restrict)
+  part      Part?               @relation(fields: [partId], references: [id], onDelete: Restrict)
+
+  @@index([reportId])
+  @@index([operationId])
+  @@index([partId])
+  @@index([scrapDate])
+  @@map("production_scraps")
+}
+
+/// انتقال بین عملیاتی / بین انبارهای در جریان ساخت
+model ProductionTransfer {
+  id              String         @id @default(uuid()) @db.Uuid
+  transferNumber  String         @unique @map("transfer_number") @db.VarChar(32)
+  partId          String         @map("part_id") @db.Uuid
+  fromOperationId String?        @map("from_operation_id") @db.Uuid
+  toOperationId   String?        @map("to_operation_id") @db.Uuid
+  fromWarehouseId String?        @map("from_warehouse_id") @db.Uuid
+  toWarehouseId   String?        @map("to_warehouse_id") @db.Uuid
+  quantity        Decimal        @db.Decimal(18, 4)
+  weightKg        Decimal?       @map("weight_kg") @db.Decimal(18, 4)
+  transferDate    DateTime       @map("transfer_date") @db.Date
+  status          TransferStatus @default(DRAFT)
+  postingStatus   PostingStatus  @default(UNPOSTED) @map("posting_status")
+  notes           String?        @db.Text
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  part          Part               @relation(fields: [partId], references: [id], onDelete: Restrict)
+  fromOperation ProductionOperation? @relation("TransferFromOperation", fields: [fromOperationId], references: [id], onDelete: Restrict)
+  toOperation   ProductionOperation? @relation("TransferToOperation", fields: [toOperationId], references: [id], onDelete: Restrict)
+  fromWarehouse Warehouse?         @relation("TransferFromWarehouse", fields: [fromWarehouseId], references: [id], onDelete: Restrict)
+  toWarehouse   Warehouse?         @relation("TransferToWarehouse", fields: [toWarehouseId], references: [id], onDelete: Restrict)
+
+  @@index([partId])
+  @@index([transferDate])
+  @@index([postingStatus])
+  @@map("production_transfers")
+}
+
+/// تخصیص ماشین (و قالب) به عملیات
+model MachineAssignment {
+  id           String           @id @default(uuid()) @db.Uuid
+  operationId  String           @map("operation_id") @db.Uuid
+  machineId    String           @map("machine_id") @db.Uuid
+  dieId        String?          @map("die_id") @db.Uuid
+  shiftId      String?          @map("shift_id") @db.Uuid
+  plannedStart DateTime         @map("planned_start") @db.Timestamptz(6)
+  plannedEnd   DateTime?        @map("planned_end") @db.Timestamptz(6)
+  status       AssignmentStatus @default(PLANNED)
+  notes        String?          @db.Text
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  operation ProductionOperation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  machine   Machine             @relation(fields: [machineId], references: [id], onDelete: Restrict)
+  die       Die?                @relation(fields: [dieId], references: [id], onDelete: SetNull)
+  shift     Shift?              @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+
+  @@index([operationId])
+  @@index([machineId])
+  @@index([status])
+  @@map("machine_assignments")
+}
+
+// ============================================================================
+// INVENTORY DATA — داده‌های انبار
+// ============================================================================
+
+/// سند انبار (رسید/حواله/انتقال/اصلاحیه) — وضعیت سند و قطع‌بوش جدا است
+model InventoryDocument {
+  id             String             @id @default(uuid()) @db.Uuid
+  documentNumber String             @unique @map("document_number") @db.VarChar(32)
+  documentType   InventoryDocType   @map("document_type")
+  status         InventoryDocStatus @default(DRAFT)
+  postingStatus  PostingStatus      @default(UNPOSTED) @map("posting_status")
+  documentDate   DateTime           @map("document_date") @db.Date
+  warehouseId    String             @map("warehouse_id") @db.Uuid
+  referenceType  String?            @map("reference_type") @db.VarChar(64) // e.g. PRODUCTION_REPORT, MATERIAL_CONTRACT
+  referenceId    String?            @map("reference_id") @db.Uuid // polymorphic — no FK by design
+  description    String?            @db.Text
+  createdById    String             @map("created_by_id") @db.Uuid
+  postedById     String?            @map("posted_by_id") @db.Uuid
+  postedAt       DateTime?          @map("posted_at") @db.Timestamptz(6)
+  reversalOfId   String?            @map("reversal_of_id") @db.Uuid
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  warehouse            Warehouse                    @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  createdBy            User                         @relation("InvDocCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  postedBy             User?                        @relation("InvDocPostedBy", fields: [postedById], references: [id], onDelete: SetNull)
+  reversalOf           InventoryDocument?           @relation("InvDocReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversals            InventoryDocument[]          @relation("InvDocReversal")
+  lines                InventoryDocumentLine[]
+  transactions         InventoryTransaction[]
+  contractTransactions MaterialContractTransaction[]
+
+  @@index([warehouseId])
+  @@index([documentType])
+  @@index([status])
+  @@index([postingStatus])
+  @@index([documentDate])
+  @@index([reversalOfId])
+  @@map("inventory_documents")
+}
+
+/// ردیف سند انبار
+model InventoryDocumentLine {
+  id              String   @id @default(uuid()) @db.Uuid
+  documentId      String   @map("document_id") @db.Uuid
+  lineNo          Int      @map("line_no")
+  partId          String?  @map("part_id") @db.Uuid
+  materialId      String?  @map("material_id") @db.Uuid
+  lotId           String?  @map("lot_id") @db.Uuid
+  quantity        Decimal  @db.Decimal(18, 4)
+  unitId          String   @map("unit_id") @db.Uuid
+  weightKg        Decimal? @map("weight_kg") @db.Decimal(18, 4)
+  fromLocationId  String?  @map("from_location_id") @db.Uuid
+  toLocationId    String?  @map("to_location_id") @db.Uuid
+  notes           String?  @db.Text
+
+  document    InventoryDocument   @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  part        Part?               @relation(fields: [partId], references: [id], onDelete: Restrict)
+  material    Material?           @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  lot         MaterialLot?        @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  unit        UnitOfMeasure       @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  fromLocation WarehouseLocation? @relation("DocLineFromLocation", fields: [fromLocationId], references: [id], onDelete: SetNull)
+  toLocation   WarehouseLocation? @relation("DocLineToLocation", fields: [toLocationId], references: [id], onDelete: SetNull)
+
+  transactions InventoryTransaction[]
+
+  @@unique([documentId, lineNo])
+  @@index([partId])
+  @@index([materialId])
+  @@index([lotId])
+  @@map("inventory_document_lines")
+}
+
+/// تراکنش انبار — دفتر کل تغییرناپذیر (immutable ledger)
+model InventoryTransaction {
+  id               String          @id @default(uuid()) @db.Uuid
+  transactionNumber String         @unique @map("transaction_number") @db.VarChar(32)
+  documentId       String?         @map("document_id") @db.Uuid
+  documentLineId   String?         @map("document_line_id") @db.Uuid
+  type             InventoryTxType
+  partId           String?         @map("part_id") @db.Uuid
+  materialId       String?         @map("material_id") @db.Uuid
+  warehouseId      String          @map("warehouse_id") @db.Uuid
+  locationId       String?         @map("location_id") @db.Uuid
+  lotId            String?         @map("lot_id") @db.Uuid
+  quantity         Decimal         @db.Decimal(18, 4)
+  unitId           String          @map("unit_id") @db.Uuid
+  weightKg         Decimal?        @map("weight_kg") @db.Decimal(18, 4)
+  occurredAt       DateTime        @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  reversalOfId     String?         @map("reversal_of_id") @db.Uuid
+  createdById      String?         @map("created_by_id") @db.Uuid
+  createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  document     InventoryDocument?   @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  documentLine InventoryDocumentLine? @relation(fields: [documentLineId], references: [id], onDelete: Restrict)
+  part         Part?                @relation(fields: [partId], references: [id], onDelete: Restrict)
+  material     Material?            @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  warehouse    Warehouse            @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  location     WarehouseLocation?   @relation("TxLocation", fields: [locationId], references: [id], onDelete: Restrict)
+  lot          MaterialLot?         @relation(fields: [lotId], references: [id], onDelete: Restrict)
+  unit         UnitOfMeasure        @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  createdBy    User?                @relation("InvTxCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  reversalOf   InventoryTransaction? @relation("InvTxReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversals    InventoryTransaction[] @relation("InvTxReversal")
+
+  @@index([documentId])
+  @@index([documentLineId])
+  @@index([partId])
+  @@index([materialId])
+  @@index([warehouseId])
+  @@index([locationId])
+  @@index([lotId])
+  @@index([occurredAt])
+  @@index([type])
+  @@map("inventory_transactions")
+}
+
+/// رزرو موجودی برای سفارش/دستور کار
+model InventoryReservation {
+  id                      String            @id @default(uuid()) @db.Uuid
+  partId                  String?           @map("part_id") @db.Uuid
+  materialId              String?           @map("material_id") @db.Uuid
+  warehouseId             String?           @map("warehouse_id") @db.Uuid
+  quantity                Decimal           @db.Decimal(18, 4)
+  unitId                  String            @map("unit_id") @db.Uuid
+  forManufacturingOrderId String?           @map("for_manufacturing_order_id") @db.Uuid
+  forCustomerOrderLineId  String?           @map("for_customer_order_line_id") @db.Uuid
+  status                  ReservationStatus @default(ACTIVE)
+  expiresAt               DateTime?         @map("expires_at") @db.Timestamptz(6)
+  notes                   String?           @db.Text
+  createdAt               DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  part                 Part?                @relation(fields: [partId], references: [id], onDelete: Restrict)
+  material             Material?            @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  warehouse            Warehouse?           @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  unit                 UnitOfMeasure        @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  forManufacturingOrder ManufacturingOrder? @relation("ReservationForMO", fields: [forManufacturingOrderId], references: [id], onDelete: SetNull)
+  forCustomerOrderLine  CustomerOrderLine?  @relation("ReservationForOrderLine", fields: [forCustomerOrderLineId], references: [id], onDelete: SetNull)
+
+  @@index([partId])
+  @@index([materialId])
+  @@index([warehouseId])
+  @@index([status])
+  @@index([forManufacturingOrderId])
+  @@index([forCustomerOrderLineId])
+  @@map("inventory_reservations")
+}
+
+/// موجودی رسمی انبار — فقط سمت سرور و در همان تراکنش دیتابیسِ ثبت، به‌روزرسانی می‌شود
+model StockBalance {
+  id                String    @id @default(uuid()) @db.Uuid
+  partId            String?   @map("part_id") @db.Uuid
+  materialId        String?   @map("material_id") @db.Uuid
+  warehouseId       String    @map("warehouse_id") @db.Uuid
+  locationId        String?   @map("location_id") @db.Uuid
+  lotId             String?   @map("lot_id") @db.Uuid
+  quantity          Decimal   @default(0) @db.Decimal(18, 4)
+  weightKg          Decimal   @default(0) @map("weight_kg") @db.Decimal(18, 4)
+  lastTransactionAt DateTime? @map("last_transaction_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  part      Part?              @relation(fields: [partId], references: [id], onDelete: Restrict)
+  material  Material?          @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  warehouse Warehouse          @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  location  WarehouseLocation? @relation("BalanceLocation", fields: [locationId], references: [id], onDelete: Restrict)
+  lot       MaterialLot?       @relation(fields: [lotId], references: [id], onDelete: Restrict)
+
+  @@unique([partId, materialId, warehouseId, locationId, lotId])
+  @@index([warehouseId])
+  @@index([partId])
+  @@index([materialId])
+  @@index([locationId])
+  @@index([lotId])
+  @@map("stock_balances")
+}
+
+/// بچ/لوت ماده اولیه (ردیابی ورق‌های دریافتی از SAPCO)
+model MaterialLot {
+  id                String    @id @default(uuid()) @db.Uuid
+  materialId        String    @map("material_id") @db.Uuid
+  lotNumber         String    @map("lot_number") @db.VarChar(64)
+  receiptDate       DateTime  @map("receipt_date") @db.Date
+  quantityReceived  Decimal   @map("quantity_received") @db.Decimal(18, 4)
+  quantityRemaining Decimal   @map("quantity_remaining") @db.Decimal(18, 4)
+  weightReceivedKg  Decimal   @map("weight_received_kg") @db.Decimal(18, 4)
+  weightRemainingKg Decimal   @map("weight_remaining_kg") @db.Decimal(18, 4)
+  status            LotStatus @default(OPEN)
+  certificateNumber String?   @map("certificate_number") @db.VarChar(190)
+  supplierLotNumber String?   @map("supplier_lot_number") @db.VarChar(190)
+  notes             String?   @db.Text
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  material             Material                      @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  transactions         InventoryTransaction[]
+  documentLines        InventoryDocumentLine[]
+  balances             StockBalance[]
+  contractTransactions MaterialContractTransaction[]
+
+  @@unique([materialId, lotNumber])
+  @@index([status])
+  @@index([receiptDate])
+  @@map("material_lots")
+}
+
+/// قرارداد خرید ماده اولیه (SAPCO)
+model MaterialContract {
+  id                   String         @id @default(uuid()) @db.Uuid
+  contractNumber       String         @unique @map("contract_number") @db.VarChar(32)
+  supplierName         String         @default("SAPCO") @map("supplier_name") @db.VarChar(190)
+  materialId           String         @map("material_id") @db.Uuid
+  orderDate            DateTime       @map("order_date") @db.Date
+  expectedDeliveryDate DateTime?      @map("expected_delivery_date") @db.Date
+  totalQuantity        Decimal        @map("total_quantity") @db.Decimal(18, 4)
+  totalWeightKg        Decimal?       @map("total_weight_kg") @db.Decimal(18, 4)
+  status               ContractStatus @default(OPEN)
+  description          String?        @db.Text
+  createdAt            DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  material     Material                      @relation(fields: [materialId], references: [id], onDelete: Restrict)
+  transactions MaterialContractTransaction[]
+
+  @@index([materialId])
+  @@index([status])
+  @@index([orderDate])
+  @@map("material_contracts")
+}
+
+/// تراکنش قرارداد (دریافت‌های انجام‌شده)
+model MaterialContractTransaction {
+  id                 String   @id @default(uuid()) @db.Uuid
+  contractId         String   @map("contract_id") @db.Uuid
+  receivedDate       DateTime @map("received_date") @db.Date
+  quantity           Decimal  @db.Decimal(18, 4)
+  weightKg           Decimal? @map("weight_kg") @db.Decimal(18, 4)
+  lotId              String?  @map("lot_id") @db.Uuid
+  inventoryDocumentId String? @map("inventory_document_id") @db.Uuid
+  notes              String?  @db.Text
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  contract         MaterialContract    @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  lot              MaterialLot?        @relation(fields: [lotId], references: [id], onDelete: SetNull)
+  inventoryDocument InventoryDocument? @relation(fields: [inventoryDocumentId], references: [id], onDelete: SetNull)
+
+  @@index([contractId])
+  @@index([receivedDate])
+  @@index([lotId])
+  @@map("material_contract_transactions")
+}

@@ -1,0 +1,28 @@
+{
+  "name": "kpims-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KPIMS Web UI — React + TypeScript (Persian RTL)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/vazirmatn": "^5.2.5",
+    "date-fns-jalali": "^4.1.0-0",
+    "lucide-react": "^0.544.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.9.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.6"
+  }
+}
