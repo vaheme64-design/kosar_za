@@ -186,9 +186,9 @@ export function Progress({ percent }: { percent: number }) {
 // form primitives
 // ---------------------------------------------------------------------------
 
-export function Field({ label, children, hint, required }: { label: string; children: ReactNode; hint?: string; required?: boolean }) {
+export function Field({ label, children, hint, required, className }: { label: string; children: ReactNode; hint?: string; required?: boolean; className?: string }) {
   return (
-    <label className="field">
+    <label className={`field${className ? ` ${className}` : ''}`}>
       <span className="field__label">
         {label}
         {required && <b className="field__req">*</b>}

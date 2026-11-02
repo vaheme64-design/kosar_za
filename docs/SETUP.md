@@ -122,7 +122,10 @@ curl 'http://localhost:4100/api/v1/reports/machine-workload?format=csv' \
 ```
 
 مسیرهای ماژول‌های هنوز پیاده‌سازی‌نشده (`/api/v1/machines`، `/api/v1/settings`)
-عمداً `501 Not Implemented` برمی‌گردانند تا مرز پیاده‌سازی شفاف بماند.
+در فاز ۶ همه ماژول‌ها پیاده‌سازی شده‌اند؛ نقطه‌های ورود منابع پایه:
+`/api/v1/master-data/<resource>` (CRUD + `/export` + `/import`)،
+`/api/v1/machines` (جزئیات/توانمندی/قالب/ظرفیت) و `/api/v1/settings`
+(کاربران/نقش‌ها/دنباله‌ها/تنظیمات/لاگ حسابرسی).
 
 ## ۷) رفع اشکال
 

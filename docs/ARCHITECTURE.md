@@ -109,7 +109,7 @@ kpims/
 │       ├── middleware/          # auth (JWT+RBAC)، errorHandler، requestLogger
 │       ├── modules/             # auth، health، dashboard
 │       ├── services/            # documentNumber.service.ts (الگوی فازهای بعد)
-│       ├── routes/index.ts      # mount ماژول‌ها + stubهای 501
+│       ├── routes/index.ts      # mount همه ماژول‌ها (بدون stub — فاز ۶ تمام ماژول‌ها واقعی‌اند)
 │       ├── app.ts / server.ts
 │       └── .env                 # (local) — از .env.example
 ├── frontend/                    # React SPA فارسی RTL
@@ -216,7 +216,9 @@ reverseDocument ──▶ سند ابطالی جدید (آینه تراکنش‌
 در UI با نشان رنگی نمایش داده می‌شود.
 
 ### محدودیت‌های شفاف نسخه فعلی
-- ماژول‌های اطلاعات پایه (CRUD) و کاربران/تنظیمات هنوز endpoint کامل ندارند (`501`)؛ lookups فقط‌خواندنی است.
+- فاز ۶: اطلاعات پایه (۱۴ موجودیت)، ماشین‌آلات/ظرفیت و کاربران/تنظیمات CRUD کامل دارند؛
+  جستجوی سراسری در `/api/v1/search` و ورود/خروجی اکسل در همه منابع پایه فعال است
+  (`GET /<resource>/export` و `POST /<resource>/import` مبتنی بر رجیستری master-data).
 - توکن JWT در localStorage نگه‌داری می‌شود (سادگی فاز صفر)؛ مهاجرت به httpOnly cookie
   در فازهای بعد انجام می‌شود.
 - تقویم کاری روزهای تعطیل و ظرفیت سطلی روزبه‌روز هنوز مدل نشده — ظرفیت روزانه =

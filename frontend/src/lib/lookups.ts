@@ -15,11 +15,12 @@ export interface Lookups {
   customers: { id: string; code: string; nameFa: string }[];
   routes: { id: string; partId: string; version: number; name: string | null }[];
   operations: { id: string; code: string; nameFa: string }[];
+  dies: { id: string; code: string; nameFa: string; status: string }[];
 }
 
 const EMPTY: Lookups = {
   parts: [], materials: [], warehouses: [], locations: [], units: [],
-  lots: [], contracts: [], shifts: [], machines: [], customers: [], routes: [], operations: [],
+  lots: [], contracts: [], shifts: [], machines: [], customers: [], routes: [], operations: [], dies: [],
 };
 
 /** Fetch (and cache per mount) the master-data lookups. */

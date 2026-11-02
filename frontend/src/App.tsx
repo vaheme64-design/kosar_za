@@ -3,9 +3,7 @@ import { RequireAuth } from './components/RequireAuth';
 import { AppLayout } from './components/layout/AppLayout';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
-import { PlaceholderPage } from './components/PlaceholderPage';
 import { NotFoundPage } from './pages/NotFoundPage';
-import { MODULES } from './config/modules';
 
 import { InventoryDashboardPage } from './pages/inventory/InventoryDashboardPage';
 import { ReceiptFormPage } from './pages/inventory/ReceiptFormPage';
@@ -29,6 +27,30 @@ import { PlanDetailPage } from './pages/planning/PlanDetailPage';
 
 import { ReportsIndexPage } from './pages/reports/ReportsIndexPage';
 import { ReportViewerPage } from './pages/reports/ReportViewerPage';
+
+// اطلاعات پایه — فاز ۶
+import { MasterDataHomePage } from './pages/masterdata/MasterDataHomePage';
+import { PartsPage } from './pages/masterdata/PartsPage';
+import { MaterialsPage } from './pages/masterdata/MaterialsPage';
+import { CustomersPage } from './pages/masterdata/CustomersPage';
+import { OperationsPage } from './pages/masterdata/OperationsPage';
+import { UnitsPage } from './pages/masterdata/UnitsPage';
+import { WarehousesPage, WarehouseLocationsPage } from './pages/masterdata/WarehousesPage';
+import { ShiftsPage } from './pages/masterdata/ShiftsPage';
+import { RoutesPage } from './pages/masterdata/RoutesPage';
+import { BomPage } from './pages/masterdata/BomPage';
+
+// ماشین‌آلات و ظرفیت — فاز ۶
+import { MachinesPage } from './pages/machines/MachinesPage';
+import { DiesPage } from './pages/machines/DiesPage';
+import { CapacityPage } from './pages/machines/CapacityPage';
+
+// کاربران و تنظیمات — فاز ۶
+import { SettingsHomePage } from './pages/settings/SettingsHomePage';
+import { UsersPage } from './pages/settings/UsersPage';
+import { RolesPage } from './pages/settings/RolesPage';
+import { SequencesPage, SystemSettingsPage } from './pages/settings/SequencesPage';
+import { AuditLogsPage } from './pages/settings/AuditLogsPage';
 
 export default function App() {
   return (
@@ -67,13 +89,31 @@ export default function App() {
           <Route path="/reports" element={<ReportsIndexPage />} />
           <Route path="/reports/:key" element={<ReportViewerPage />} />
 
-          {MODULES.filter((m) => m.status === 'planned').map((m) => (
-            <Route
-              key={m.key}
-              path={m.path.slice(1)}
-              element={<PlaceholderPage moduleKey={m.key} />}
-            />
-          ))}
+          {/* اطلاعات پایه — فاز ۶ */}
+          <Route path="/master-data" element={<MasterDataHomePage />} />
+          <Route path="/master-data/parts" element={<PartsPage />} />
+          <Route path="/master-data/materials" element={<MaterialsPage />} />
+          <Route path="/master-data/bom" element={<BomPage />} />
+          <Route path="/master-data/routes" element={<RoutesPage />} />
+          <Route path="/master-data/operations" element={<OperationsPage />} />
+          <Route path="/master-data/warehouses" element={<WarehousesPage />} />
+          <Route path="/master-data/warehouse-locations" element={<WarehouseLocationsPage />} />
+          <Route path="/master-data/units" element={<UnitsPage />} />
+          <Route path="/master-data/shifts" element={<ShiftsPage />} />
+          <Route path="/master-data/customers" element={<CustomersPage />} />
+
+          {/* ماشین‌آلات و ظرفیت — فاز ۶ */}
+          <Route path="/machines" element={<MachinesPage />} />
+          <Route path="/machines/dies" element={<DiesPage />} />
+          <Route path="/machines/capacity" element={<CapacityPage />} />
+
+          {/* کاربران و تنظیمات — فاز ۶ */}
+          <Route path="/settings" element={<SettingsHomePage />} />
+          <Route path="/settings/users" element={<UsersPage />} />
+          <Route path="/settings/roles" element={<RolesPage />} />
+          <Route path="/settings/document-sequences" element={<SequencesPage />} />
+          <Route path="/settings/system" element={<SystemSettingsPage />} />
+          <Route path="/settings/audit-logs" element={<AuditLogsPage />} />
         </Route>
       </Route>
       <Route path="*" element={<NotFoundPage />} />

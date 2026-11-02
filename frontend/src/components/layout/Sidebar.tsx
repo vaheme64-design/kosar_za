@@ -68,7 +68,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
               </button>
             </div>
           )}
-          <div className="sidebar__version">نسخه ۰٫۴٫۰ — فازهای ۰ تا ۴</div>
+          <div className="sidebar__version">نسخه ۰٫۶٫۰ — فازهای ۰ تا ۶</div>
         </div>
       </aside>
     </>
