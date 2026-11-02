@@ -50,7 +50,11 @@ import { SettingsHomePage } from './pages/settings/SettingsHomePage';
 import { UsersPage } from './pages/settings/UsersPage';
 import { RolesPage } from './pages/settings/RolesPage';
 import { SequencesPage, SystemSettingsPage } from './pages/settings/SequencesPage';
+import { AISettingsPage } from './pages/settings/AISettingsPage';
 import { AuditLogsPage } from './pages/settings/AuditLogsPage';
+
+// رول‌ها و لوت‌های ماده اولیه — فاز ۷
+import { LotsPage } from './pages/inventory/LotsPage';
 
 export default function App() {
   return (
@@ -70,6 +74,7 @@ export default function App() {
           <Route path="/inventory/movements" element={<MovementLedgerPage />} />
           <Route path="/inventory/documents" element={<DocumentsPage />} />
           <Route path="/inventory/reservations" element={<ReservationsPage />} />
+          <Route path="/inventory/lots" element={<LotsPage />} />
 
           {/* مواد SAPCO — فاز ۲ */}
           <Route path="/sapco-materials" element={<SapcoMaterialsPage />} />
@@ -113,6 +118,7 @@ export default function App() {
           <Route path="/settings/roles" element={<RolesPage />} />
           <Route path="/settings/document-sequences" element={<SequencesPage />} />
           <Route path="/settings/system" element={<SystemSettingsPage />} />
+          <Route path="/settings/ai" element={<AISettingsPage />} />
           <Route path="/settings/audit-logs" element={<AuditLogsPage />} />
         </Route>
       </Route>

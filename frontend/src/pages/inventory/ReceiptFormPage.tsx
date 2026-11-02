@@ -1,11 +1,12 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, Trash2, Save, Send } from 'lucide-react';
+import { FilePlus2, Plus, Trash2, Save, Send } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
 import { faNumber } from '../../lib/jalali';
-import { Page, Card, Field, TextInput, Select, Button, ErrorBanner, Loading, Badge, fa } from '../../components/ui';
+import { Page, Card, Field, TextInput, Select, Button, ErrorBanner, Loading, Badge, Modal, fa } from '../../components/ui';
 import { SubNav } from '../../components/SubNav';
+import { AiSuggestBox } from '../../components/ai/AiSuggestBox';
 
 interface LineState {
   key: number;
@@ -27,7 +28,7 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 
 export function ReceiptFormPage() {
   const navigate = useNavigate();
-  const { lookups, loading: lookupsLoading } = useLookups();
+  const { lookups, loading: lookupsLoading, reload } = useLookups();
 
   const [warehouseId, setWarehouseId] = useState('');
   const [documentDate, setDocumentDate] = useState(todayStr());
@@ -37,6 +38,12 @@ export function ReceiptFormPage() {
   ]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // «قرارداد جدید (سریع)» modal — creates a contract without leaving the form
+  const [contractModalFor, setContractModalFor] = useState<number | null>(null); // line key
+  const [contractForm, setContractForm] = useState({ contractNumber: '', supplierName: 'SAPCO', materialId: '', orderDate: todayStr(), totalQuantity: '', totalWeightKg: '', description: '' });
+  const [contractBusy, setContractBusy] = useState(false);
+  const [contractError, setContractError] = useState<string | null>(null);
 
   const unitById = useMemo(() => new Map(lookups.units.map((u) => [u.id, u])), [lookups.units]);
 
@@ -51,6 +58,68 @@ export function ReceiptFormPage() {
     ]);
 
   const removeLine = (key: number) => setLines((prev) => prev.filter((l) => l.key !== key));
+
+  // ------------------------------------------------------------- قرارداد جدید (سریع)
+  /** Suggest a unique CT-YYYYMMDD-nn number from the contracts already loaded. */
+  const suggestContractNumber = () => {
+    const today = todayStr().replace(/-/g, '');
+    let max = 0;
+    for (const c of lookups.contracts) {
+      const m = c.contractNumber.match(new RegExp(`^CT-${today}-(\\d+)$`));
+      if (m) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+    }
+    return `CT-${today}-${String(max + 1).padStart(2, '0')}`;
+  };
+
+  const openContractModal = (line: LineState) => {
+    setContractError(null);
+    setContractForm({
+      contractNumber: suggestContractNumber(),
+      supplierName: 'SAPCO',
+      materialId: line.kind === 'MATERIAL' ? line.itemId : '',
+      orderDate: todayStr(),
+      totalQuantity: line.quantity || '',
+      totalWeightKg: '',
+      description: '',
+    });
+    setContractModalFor(line.key);
+  };
+
+  const createContract = async () => {
+    if (!contractForm.contractNumber.trim()) return setContractError('شماره قرارداد را وارد کنید');
+    if (!contractForm.materialId) return setContractError('ماده اولیه قرارداد را انتخاب کنید');
+    if (!contractForm.orderDate) return setContractError('تاریخ قرارداد را وارد کنید');
+    if (!contractForm.totalQuantity || Number(contractForm.totalQuantity) <= 0) return setContractError('مقدار کل قرارداد باید بزرگ‌تر از صفر باشد');
+    setContractBusy(true);
+    setContractError(null);
+    try {
+      const res = await api<{ contract: { id: string; contractNumber: string } }>('/inventory/contracts', {
+        method: 'POST',
+        body: {
+          contractNumber: contractForm.contractNumber.trim(),
+          supplierName: contractForm.supplierName.trim() || 'SAPCO',
+          materialId: contractForm.materialId,
+          orderDate: contractForm.orderDate,
+          totalQuantity: contractForm.totalQuantity,
+          ...(contractForm.totalWeightKg ? { totalWeightKg: contractForm.totalWeightKg } : {}),
+          ...(contractForm.description ? { description: contractForm.description } : {}),
+        },
+      });
+      await reload(); // refresh the contract picker list
+      if (contractModalFor != null) {
+        patchLine(contractModalFor, { contractId: res.contract.id, ownership: 'SUPPLIER_CONSIGNMENT' });
+      }
+      setContractModalFor(null);
+    } catch (err) {
+      const faMsg = (err as { messageFa?: string }).messageFa;
+      setContractError(faMsg ?? (err instanceof Error ? err.message : 'خطا در ایجاد قرارداد'));
+    } finally {
+      setContractBusy(false);
+    }
+  };
 
   const buildPayload = useCallback(() => {
     return {
@@ -120,6 +189,7 @@ export function ReceiptFormPage() {
         items={[
           { to: '/inventory', label: 'داشبورد' },
           { to: '/inventory/receipts/new', label: 'رسید جدید' },
+          { to: '/inventory/lots', label: 'رول‌ها و لوت‌ها' },
           { to: '/inventory/documents', label: 'سندها' },
         ]}
       />
@@ -220,13 +290,24 @@ export function ReceiptFormPage() {
                         )}
                       </div>
                     </Field>
-                    <Field label="قرارداد SAPCO" hint="با انتخاب قرارداد، ورق به‌صورت امانی ثبت می‌شود">
-                      <Select value={l.contractId} onChange={(e) => patchLine(l.key, { contractId: e.target.value, ownership: e.target.value ? 'SUPPLIER_CONSIGNMENT' : l.ownership })}>
-                        <option value="">— بدون قرارداد —</option>
-                        {lookups.contracts.filter((c) => c.materialId === l.itemId).map((c) => (
-                          <option key={c.id} value={c.id}>{c.contractNumber} ({c.supplierName})</option>
-                        ))}
-                      </Select>
+                    <Field label="قرارداد SAPCO" hint="با انتخاب قرارداد، ورق به‌صورت امانی ثبت می‌شود — اگر قرارداد ندارید همین‌جا بسازید">
+                      <div className="inline-controls">
+                        <Select value={l.contractId} onChange={(e) => patchLine(l.key, { contractId: e.target.value, ownership: e.target.value ? 'SUPPLIER_CONSIGNMENT' : l.ownership })}>
+                          <option value="">— بدون قرارداد —</option>
+                          {lookups.contracts.filter((c) => c.materialId === l.itemId).map((c) => (
+                            <option key={c.id} value={c.id}>{c.contractNumber} ({c.supplierName})</option>
+                          ))}
+                        </Select>
+                        <Button
+                          variant="ghost"
+                          onClick={() => openContractModal(l)}
+                          disabled={!l.itemId}
+                          title="قرارداد جدید (سریع) برای این ماده"
+                          type="button"
+                        >
+                          <FilePlus2 size={14} /> قرارداد جدید
+                        </Button>
+                      </div>
                     </Field>
                     <Field label="مالکیت">
                       <Select value={l.ownership} onChange={(e) => patchLine(l.key, { ownership: e.target.value })}>
@@ -276,6 +357,8 @@ export function ReceiptFormPage() {
         </div>
       </Card>
 
+      <AiSuggestBox documentType="RECEIPT" buildDraft={() => buildPayload()} />
+
       <div className="form-actions">
         <Button variant="ghost" onClick={() => submit(false)} disabled={busy} type="button">
           <Save size={16} /> ذخیره پیش‌نویس
@@ -284,6 +367,51 @@ export function ReceiptFormPage() {
           <Send size={16} /> ذخیره و قطع‌بوش
         </Button>
       </div>
+
+      {contractModalFor != null && (
+        <Modal title="قرارداد جدید (سریع)" onClose={() => setContractModalFor(null)}>
+          <p className="kpi-note">
+            قرارداد ماده اولیه بدون خروج از فرم رسید ساخته می‌شود و بلافاصله در همین ردیف انتخاب می‌گردد.
+          </p>
+          <ErrorBanner message={contractError} />
+          <div className="form-grid form-grid--wide">
+            <Field label="شماره قرارداد" required hint="شماره پیشنهادی را می‌توانید تغییر دهید">
+              <TextInput dir="ltr" value={contractForm.contractNumber} onChange={(e) => setContractForm((f) => ({ ...f, contractNumber: e.target.value }))} />
+            </Field>
+            <Field label="تأمین‌کننده" hint="پیش‌فرض: SAPCO">
+              <TextInput value={contractForm.supplierName} onChange={(e) => setContractForm((f) => ({ ...f, supplierName: e.target.value }))} />
+            </Field>
+            <Field label="ماده اولیه" required>
+              <Select value={contractForm.materialId} onChange={(e) => setContractForm((f) => ({ ...f, materialId: e.target.value }))}>
+                <option value="">— انتخاب ماده —</option>
+                {lookups.materials.map((m) => (
+                  <option key={m.id} value={m.id}>{m.materialCode} — {m.nameFa}</option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="تاریخ قرارداد" required>
+              <TextInput type="date" value={contractForm.orderDate} onChange={(e) => setContractForm((f) => ({ ...f, orderDate: e.target.value }))} />
+            </Field>
+            <Field label="مقدار کل" required>
+              <TextInput type="number" min="0" step="0.001" value={contractForm.totalQuantity} onChange={(e) => setContractForm((f) => ({ ...f, totalQuantity: e.target.value }))} />
+            </Field>
+            <Field label="وزن کل (kg)" hint="در صورت داشتن وزن قراردادی">
+              <TextInput type="number" min="0" step="0.001" value={contractForm.totalWeightKg} onChange={(e) => setContractForm((f) => ({ ...f, totalWeightKg: e.target.value }))} />
+            </Field>
+            <Field label="توضیحات">
+              <TextInput value={contractForm.description} onChange={(e) => setContractForm((f) => ({ ...f, description: e.target.value }))} />
+            </Field>
+          </div>
+          <div className="form-actions">
+            <Button onClick={() => void createContract()} disabled={contractBusy} type="button">
+              <Save size={15} /> {contractBusy ? 'در حال ایجاد…' : 'ایجاد و انتخاب قرارداد'}
+            </Button>
+            <Button variant="ghost" onClick={() => setContractModalFor(null)} disabled={contractBusy} type="button">
+              انصراف
+            </Button>
+          </div>
+        </Modal>
+      )}
     </Page>
   );
 }

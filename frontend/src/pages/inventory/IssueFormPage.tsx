@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Plus, Trash2, Save, Send } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
-import { Page, Card, Field, TextInput, Select, Button, ErrorBanner, Loading, faNumber } from '../../components/ui';
+import { Page, Card, Field, TextInput, Select, Button, ErrorBanner, Loading, Badge, faNumber } from '../../components/ui';
 import { SubNav } from '../../components/SubNav';
+import { AiSuggestBox } from '../../components/ai/AiSuggestBox';
 
 interface LineState {
   key: number;
@@ -15,6 +16,15 @@ interface LineState {
   fromLocationId: string;
   reservationId: string;
   docType: 'ISSUE' | 'PRODUCTION_ISSUE' | 'SCRAP_DISPOSAL';
+}
+
+interface MoOption {
+  id: string;
+  moNumber: string;
+  partId: string;
+  part: { partNumber: string; nameFa: string };
+  status: string;
+  quantity: string;
 }
 
 let lineKey = 1;
@@ -33,6 +43,29 @@ export function IssueFormPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // مرجع اختیاری سند: دستور کار ساخت
+  const [mos, setMos] = useState<MoOption[]>([]);
+  const [mosLoading, setMosLoading] = useState(false);
+  const [referenceId, setReferenceId] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setMosLoading(true);
+    api<{ manufacturingOrders: MoOption[] }>('/production/mos?take=200')
+      .then((res) => {
+        if (!cancelled) setMos(res.manufacturingOrders);
+      })
+      .catch(() => {
+        if (!cancelled) setMos([]); // the picker degrades to «— بدون دستور کار —»
+      })
+      .finally(() => {
+        if (!cancelled) setMosLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const patchLine = useCallback((key: number, patch: Partial<LineState>) => {
     setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   }, []);
@@ -43,6 +76,35 @@ export function IssueFormPage() {
   const removeLine = (key: number) => setLines((prev) => prev.filter((l) => l.key !== key));
 
   const materialLots = useMemo(() => new Map(lookups.lots.map((l) => [l.id, l])), [lookups.lots]);
+
+  /** If exactly one part is chosen across PART lines, narrow the MO list to it. */
+  const moOptions = useMemo(() => {
+    const partIds = [...new Set(lines.filter((l) => l.kind === 'PART' && l.itemId).map((l) => l.itemId))];
+    if (partIds.length !== 1) return mos;
+    const pid = partIds[0];
+    return mos.filter((m) => m.partId === pid);
+  }, [mos, lines]);
+
+  /** Draft for the AI document reviewer (advisory only — never posted). */
+  const buildAiDraft = useCallback(
+    () => ({
+      documentType: 'ISSUE',
+      documentDate,
+      warehouseId,
+      description: description || null,
+      referenceType: referenceId ? 'MANUFACTURING_ORDER' : null,
+      referenceId: referenceId || null,
+      lines: lines.map((l) => ({
+        documentType: l.docType,
+        ...(l.kind === 'MATERIAL' ? { materialId: l.itemId } : { partId: l.itemId }),
+        ...(l.kind === 'MATERIAL' ? { lotId: l.lotId } : {}),
+        quantity: l.quantity,
+        ...(l.fromLocationId ? { fromLocationId: l.fromLocationId } : {}),
+        ...(l.reservationId ? { reservationId: l.reservationId } : {}),
+      })),
+    }),
+    [documentDate, warehouseId, description, referenceId, lines],
+  );
 
   const submit = async (post: boolean) => {
     if (!warehouseId) {
@@ -73,6 +135,7 @@ export function IssueFormPage() {
             documentDate,
             warehouseId,
             description: description || null,
+            ...(referenceId ? { referenceType: 'MANUFACTURING_ORDER', referenceId } : {}),
             lines: typeLines.map((l) => ({
               ...(l.kind === 'MATERIAL' ? { materialId: l.itemId } : { partId: l.itemId }),
               ...(l.kind === 'MATERIAL' ? { lotId: l.lotId } : {}),
@@ -105,6 +168,7 @@ export function IssueFormPage() {
         items={[
           { to: '/inventory', label: 'داشبورد' },
           { to: '/inventory/issues/new', label: 'حواله جدید' },
+          { to: '/inventory/lots', label: 'رول‌ها و لوت‌ها' },
           { to: '/inventory/documents', label: 'سندها' },
         ]}
       />
@@ -125,6 +189,25 @@ export function IssueFormPage() {
           </Field>
           <Field label="توضیحات">
             <TextInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder="مثلاً حواله تولید دستور کار …" />
+          </Field>
+          <Field
+            label="مرجع: دستور کار (اختیاری)"
+            hint={
+              mosLoading
+                ? 'در حال دریافت دستور کارها…'
+                : moOptions.length !== mos.length
+                  ? 'فهرست بر اساس قطعه‌ی ردیف‌ها محدود شده است'
+                  : 'با انتخاب دستور کار، حواله به آن مرتبط می‌شود'
+            }
+          >
+            <Select value={referenceId} onChange={(e) => setReferenceId(e.target.value)}>
+              <option value="">— بدون دستور کار —</option>
+              {moOptions.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.moNumber} — {m.part.partNumber} ({m.part.nameFa})
+                </option>
+              ))}
+            </Select>
           </Field>
         </div>
       </Card>
@@ -209,12 +292,33 @@ export function IssueFormPage() {
                       موجودی لوت: {faNumber(Math.round(Number(materialLots.get(l.lotId)!.weightRemainingKg) * 100) / 100)} kg
                     </span>
                   )}
+                  {l.kind === 'MATERIAL' &&
+                    l.lotId &&
+                    (() => {
+                      const lot = materialLots.get(l.lotId);
+                      const m = lookups.materials.find((x) => x.id === l.itemId);
+                      if (!lot || !m) return null;
+                      if (m.materialType !== 'COIL' && m.materialType !== 'SHEET') return null;
+                      if (!l.quantity || Number(l.quantity) <= 0) return null;
+                      if (!m.unitWeightKg) {
+                        return <Badge tone="muted">وزن مصرف از رول پس از قطع‌بوش محاسبه می‌شود (وزن واحد ماده ثبت نشده است)</Badge>;
+                      }
+                      const consumedKg = Number(l.quantity) * Number(m.unitWeightKg);
+                      const remaining = Number(lot.weightRemainingKg) - consumedKg;
+                      return (
+                        <Badge tone={remaining < 0 ? 'danger' : 'info'}>
+                          باقی‌مانده این رول پس از این مصرف: {faNumber(Math.round(remaining * 100) / 100)} کیلوگرم — باقی‌مانده به‌صورت رول ناقص در انبار می‌ماند
+                        </Badge>
+                      );
+                    })()}
                 </div>
               </div>
             </div>
           ))}
         </div>
       </Card>
+
+      <AiSuggestBox documentType="ISSUE" buildDraft={() => buildAiDraft()} />
 
       <div className="form-actions">
         <Button variant="ghost" onClick={() => submit(false)} disabled={busy} type="button">

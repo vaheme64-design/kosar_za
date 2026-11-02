@@ -10,6 +10,7 @@ import { masterDataRouter } from '../modules/masterdata/masterdata.routes';
 import { machinesRouter } from '../modules/machines/machines.routes';
 import { settingsRouter } from '../modules/settings/settings.routes';
 import { searchRouter } from '../modules/search/search.routes';
+import { aiRouter } from '../modules/ai/ai.routes';
 import { authenticate } from '../middleware/auth';
 import { MODULES } from '../config/modules';
 
@@ -31,6 +32,7 @@ apiRouter.use('/master-data', masterDataRouter);
 apiRouter.use('/machines', machinesRouter);
 apiRouter.use('/settings', settingsRouter);
 apiRouter.use('/search', searchRouter);
+apiRouter.use('/ai', aiRouter);
 
 apiRouter.get('/meta/modules', authenticate, (_req, res) => {
   res.json({ modules: MODULES });

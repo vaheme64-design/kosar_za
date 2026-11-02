@@ -10,10 +10,12 @@ import { REPORT_CATALOG, type ReportTable } from './reports.types';
 import { reportFiltersSchema, drillDownSchema, type ReportFilters } from './reports.schemas';
 import {
   backlog,
+  coilInventory,
   drillDown,
   inventoryMovements,
   inventoryReconciliation,
   inventoryValuation,
+  lotConsumption,
   machineWorkload,
   materialConsumption,
   orderFulfillment,
@@ -41,6 +43,8 @@ const REPORTS: Record<string, ReportFn> = {
   'production-delays': productionDelays,
   'inventory-movements': inventoryMovements,
   'inventory-reconciliation': inventoryReconciliation,
+  'coil-inventory': coilInventory,
+  'lot-consumption': lotConsumption,
 };
 
 /** Safe route-param/query parsing — empty query strings are dropped. */
@@ -77,6 +81,13 @@ export async function reportByKey(req: Request, res: Response): Promise<void> {
   }
 
   res.json(report);
+}
+
+/** Executed by the AI report-query endpoint (whitelisted key + zod-validated filters). */
+export async function runReportByKey(key: string, filters: ReportFilters): Promise<ReportTable> {
+  const fn = REPORTS[key];
+  if (!fn) throw new ApiError(404, `Unknown report: ${key}`, 'گزارش درخواستی یافت نشد', 'report_not_found');
+  return fn(filters);
 }
 
 export async function reportDrillDown(req: Request, res: Response): Promise<void> {

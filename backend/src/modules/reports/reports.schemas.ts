@@ -21,6 +21,10 @@ export const reportFiltersSchema = z
     machineId: uuid.optional(),
     operationId: uuid.optional(),
     warehouseId: uuid.optional(),
+    /** رول/لوت مشخص — برای گزارش‌های لوت‌محور (coil-inventory / lot-consumption) */
+    lotNumber: z.string().trim().max(64).optional(),
+    /** جستجوی آزاد (شماره لوت / شماره رگال / گواهی) */
+    q: z.string().trim().max(100).optional(),
     format: z.enum(['json', 'csv']).default('json'),
   })
   .strict();

@@ -14,6 +14,8 @@ inventoryRouter.get('/documents', requirePermission('inventory.view'), ctrl.docu
 inventoryRouter.get('/documents/:id', requirePermission('inventory.view'), ctrl.documentsGet);
 inventoryRouter.get('/reservations', requirePermission('inventory.view'), ctrl.reservationsList);
 inventoryRouter.get('/lots', requirePermission('inventory.view'), ctrl.lotsList);
+inventoryRouter.get('/lots/summary', requirePermission('inventory.view'), ctrl.lotsSummary);
+inventoryRouter.get('/lots/:id/trace', requirePermission('inventory.view'), ctrl.lotTrace);
 inventoryRouter.get('/contracts', requirePermission('inventory.view'), ctrl.contractsList);
 inventoryRouter.get('/sapco/account', requirePermission('inventory.view'), ctrl.sapcoAccount);
 

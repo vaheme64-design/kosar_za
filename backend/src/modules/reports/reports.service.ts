@@ -16,6 +16,7 @@ import {
   machineUtilization, meta, resolvePeriod, table, endOfDay, ZERO,
 } from './reports.helpers';
 import type { ReportTable, ReportColumn, DrillRef } from './reports.types';
+import type { ReportFilters } from './reports.schemas';
 
 type D = Prisma.Decimal;
 
@@ -1685,4 +1686,349 @@ export async function drillDown(kind: string, id: string, f: { from?: string; to
     default:
       throw new ApiError(400, `Unhandled drill-down kind: ${kind}`, 'نوع جزئیات پشتیبانی نمی‌شود', 'bad_drill_kind');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 — roll/coil (lot) inventory & consumption traceability
+// ---------------------------------------------------------------------------
+
+type LotLike = {
+  status: string;
+  quantityReceived: Prisma.Decimal.Value;
+  quantityRemaining: Prisma.Decimal.Value;
+  weightReceivedKg: Prisma.Decimal.Value;
+  weightRemainingKg: Prisma.Decimal.Value;
+};
+
+export type DerivedLotStatus = 'FULL' | 'PARTIAL' | 'CONSUMED' | 'BLOCKED';
+
+export const LOT_STATUS_FA: Record<DerivedLotStatus, string> = {
+  FULL: 'سالم (باز)',
+  PARTIAL: 'ناقص (بازشده)',
+  CONSUMED: 'مصرف‌شده',
+  BLOCKED: 'مسدود',
+};
+
+/** Roll state derived from real lot balances — never stored, never assumed. */
+export function deriveLotStatus(l: LotLike): DerivedLotStatus {
+  if (l.status === 'BLOCKED') return 'BLOCKED';
+  const remainingKg = Q(l.weightRemainingKg);
+  if (l.status === 'CLOSED' || remainingKg.comparedTo(0) <= 0 || Q(l.quantityRemaining).comparedTo(0) <= 0) {
+    return 'CONSUMED';
+  }
+  if (remainingKg.comparedTo(Q(l.weightReceivedKg)) < 0) return 'PARTIAL';
+  return 'FULL';
+}
+
+interface LotQueryFilters {
+  materialId?: string;
+  warehouseId?: string;
+  lotNumber?: string;
+  q?: string;
+}
+
+interface LotAggregate {
+  id: string;
+  lotNumber: string;
+  supplierLotNumber: string | null;
+  certificateNumber: string | null;
+  receiptDate: Date;
+  ownership: string;
+  status: string;
+  derivedStatus: DerivedLotStatus;
+  materialId: string;
+  materialCode: string;
+  materialNameFa: string;
+  unitCode: string;
+  weightReceivedKg: D;
+  weightRemainingKg: D;
+  quantityReceived: D;
+  quantityRemaining: D;
+  contractNumbers: string[];
+  locations: { warehouseCode: string; warehouseNameFa: string; locationCode: string | null; locationNameFa: string | null; weightKg: string }[];
+}
+
+/** Shared lot fetch+aggregate used by the coil-inventory report and the lots API. */
+export async function loadLotAggregates(f: LotQueryFilters, take: number): Promise<LotAggregate[]> {
+  const where: Prisma.MaterialLotWhereInput = {};
+  if (f.materialId) where.materialId = f.materialId;
+  if (f.lotNumber) where.lotNumber = { contains: f.lotNumber };
+  if (f.q) {
+    const q = f.q.trim();
+    const materialIds = (
+      await db.material.findMany({
+        where: {
+          OR: [{ materialCode: { contains: q, mode: 'insensitive' } }, { nameFa: { contains: q } }],
+        },
+        select: { id: true },
+      })
+    ).map((m) => m.id);
+    where.OR = [
+      { lotNumber: { contains: q, mode: 'insensitive' } },
+      { supplierLotNumber: { contains: q, mode: 'insensitive' } },
+      { certificateNumber: { contains: q, mode: 'insensitive' } },
+      ...(materialIds.length > 0 ? [{ materialId: { in: materialIds } }] : []),
+    ];
+  }
+
+  const lots = await db.materialLot.findMany({
+    where,
+    orderBy: { receiptDate: 'desc' },
+    take,
+    include: { material: { select: { materialCode: true, nameFa: true, baseUnit: { select: { code: true } } } } },
+  });
+  if (lots.length === 0) return [];
+
+  const lotIds = lots.map((l) => l.id);
+  const [balances, contractTxs] = await Promise.all([
+    db.stockBalance.findMany({
+      where: { lotId: { in: lotIds }, ...(f.warehouseId ? { warehouseId: f.warehouseId } : {}) },
+      include: {
+        warehouse: { select: { code: true, nameFa: true } },
+        location: { select: { code: true, nameFa: true } },
+      },
+    }),
+    db.materialContractTransaction.findMany({
+      where: { lotId: { in: lotIds } },
+      include: { contract: { select: { contractNumber: true } } },
+    }),
+  ]);
+
+  const balancesByLot = new Map<string, typeof balances>();
+  for (const b of balances) {
+    if (!b.lotId) continue;
+    const list = balancesByLot.get(b.lotId) ?? [];
+    list.push(b);
+    balancesByLot.set(b.lotId, list);
+  }
+  const contractsByLot = new Map<string, Set<string>>();
+  for (const t of contractTxs) {
+    if (!t.lotId) continue;
+    const set = contractsByLot.get(t.lotId) ?? new Set<string>();
+    set.add(t.contract.contractNumber);
+    contractsByLot.set(t.lotId, set);
+  }
+
+  return lots
+    .filter((l) => (f.warehouseId ? (balancesByLot.get(l.id) ?? []).length > 0 : true))
+    .map((l) => {
+      const lbs = balancesByLot.get(l.id) ?? [];
+      const locations = lbs.map((b) => ({
+        warehouseCode: b.warehouse.code,
+        warehouseNameFa: b.warehouse.nameFa,
+        locationCode: b.location?.code ?? null,
+        locationNameFa: b.location?.nameFa ?? null,
+        weightKg: fmt(b.weightKg, 3),
+      }));
+      return {
+        id: l.id,
+        lotNumber: l.lotNumber,
+        supplierLotNumber: l.supplierLotNumber,
+        certificateNumber: l.certificateNumber,
+        receiptDate: l.receiptDate,
+        ownership: l.ownership,
+        status: l.status,
+        derivedStatus: deriveLotStatus(l),
+        materialId: l.materialId,
+        materialCode: l.material.materialCode,
+        materialNameFa: l.material.nameFa,
+        unitCode: l.material.baseUnit.code,
+        weightReceivedKg: Q(l.weightReceivedKg),
+        weightRemainingKg: Q(l.weightRemainingKg),
+        quantityReceived: Q(l.quantityReceived),
+        quantityRemaining: Q(l.quantityRemaining),
+        contractNumbers: [...(contractsByLot.get(l.id) ?? [])],
+        locations,
+      };
+    });
+}
+
+/** گزارش موجودی رول‌ها/کویل‌ها — per-lot ACTUAL weights + derived status. */
+export async function coilInventory(f: ReportFilters): Promise<ReportTable> {
+  const lots = await loadLotAggregates({ materialId: f.materialId, warehouseId: f.warehouseId, lotNumber: f.lotNumber, q: f.q }, 2000);
+
+  const rows = lots.map((l) => {
+    const received = l.weightReceivedKg;
+    const remaining = l.weightRemainingKg;
+    const consumed = received.minus(remaining);
+    return {
+      lotNumber: l.lotNumber,
+      materialCode: l.materialCode,
+      materialNameFa: l.materialNameFa,
+      receiptDate: isoDate(l.receiptDate),
+      derivedStatus: LOT_STATUS_FA[l.derivedStatus],
+      weightReceivedKg: fmt(received, 3),
+      weightRemainingKg: fmt(remaining, 3),
+      consumedKg: fmt(consumed, 3),
+      consumptionPct: received.comparedTo(0) > 0 ? `${consumed.div(received).mul(100).toFixed(1)}٪` : '—',
+      ownership: l.ownership === 'SUPPLIER_CONSIGNMENT' ? 'امانی (SAPCO)' : 'مالی خود',
+      contract: l.contractNumbers.join('، ') || '',
+      location: l.locations.map((x) => `${x.warehouseCode}${x.locationCode ? ` / ${x.locationCode}` : ''}`).join('، '),
+    };
+  });
+
+  const count = (s: DerivedLotStatus) => lots.filter((l) => l.derivedStatus === s).length;
+  const totalRemaining = lots.reduce((a, l) => a.plus(l.weightRemainingKg), ZERO);
+  const totalReceived = lots.reduce((a, l) => a.plus(l.weightReceivedKg), ZERO);
+
+  const m = meta(
+    { materialId: f.materialId, warehouseId: f.warehouseId, lotNumber: f.lotNumber, q: f.q },
+    [
+      `جمع رول‌ها: ${lots.length} — سالم ${count('FULL')} — ناقص ${count('PARTIAL')} — مصرف‌شده ${count('CONSUMED')} — مسدود ${count('BLOCKED')}`,
+      `جمع وزن دریافتی: ${fmt(totalReceived, 3)} کیلوگرم — جمع باقی‌مانده: ${fmt(totalRemaining, 3)} کیلوگرم`,
+      'وضعیت هر رول از موجودی واقعی لوت محاسبه شده است (سالم: بدون مصرف — ناقص: مصرف جزئی — مصرف‌شده: باقی‌مانده صفر).',
+    ],
+  );
+
+  return table(
+    'coil-inventory',
+    'موجودی رول‌ها و کویل‌های ماده اولیه',
+    [
+      { key: 'lotNumber', labelFa: 'شماره رول/لوت', kind: 'IDENTIFIER' },
+      { key: 'materialCode', labelFa: 'کد ماده', kind: 'IDENTIFIER' },
+      { key: 'materialNameFa', labelFa: 'نام ماده', kind: 'IDENTIFIER' },
+      { key: 'receiptDate', labelFa: 'تاریخ رسید', kind: 'INFO' },
+      { key: 'derivedStatus', labelFa: 'وضعیت رول', kind: 'INFO' },
+      { key: 'weightReceivedKg', labelFa: 'وزن دریافتی', kind: 'ACTUAL', unit: 'kg' },
+      { key: 'weightRemainingKg', labelFa: 'وزن باقی‌مانده', kind: 'ACTUAL', unit: 'kg' },
+      { key: 'consumedKg', labelFa: 'جمع مصرف', kind: 'ACTUAL', unit: 'kg' },
+      { key: 'consumptionPct', labelFa: 'درصد مصرف', kind: 'ACTUAL' },
+      { key: 'ownership', labelFa: 'مالکیت', kind: 'INFO' },
+      { key: 'contract', labelFa: 'قرارداد', kind: 'IDENTIFIER' },
+      { key: 'location', labelFa: 'انبار/موقعیت', kind: 'IDENTIFIER' },
+    ],
+    rows,
+    m,
+  );
+}
+
+/** گزارش ردیابی مصرف رول/لوت — real ISSUE ledger rows with purpose, per lot. */
+export async function lotConsumption(f: ReportFilters): Promise<ReportTable> {
+  const period = resolvePeriod(f.from, f.to);
+  const occurredAt: Record<string, Date> = {};
+  if (period.period.from) occurredAt.gte = period.period.from;
+  if (period.period.to) occurredAt.lte = period.period.to;
+
+  const lotWhere: Prisma.MaterialLotWhereInput = {
+    ...(f.materialId ? { materialId: f.materialId } : {}),
+    ...(f.lotNumber ? { lotNumber: { contains: f.lotNumber } } : {}),
+  };
+  const lots = await db.materialLot.findMany({
+    where: lotWhere,
+    select: { id: true, lotNumber: true },
+    take: 2000,
+  });
+  const lotIds = lots.map((l) => l.id);
+  const lotNumberById = new Map(lots.map((l) => [l.id, l.lotNumber]));
+
+  const txs = lotIds.length
+    ? await db.inventoryTransaction.findMany({
+        where: {
+          lotId: { in: lotIds },
+          occurredAt,
+          // consumption = ISSUE rows plus their reversal receipts (corrections)
+          OR: [{ type: 'ISSUE' }, { type: 'RECEIPT', reversalOfId: { not: null } }],
+        },
+        orderBy: [{ occurredAt: 'asc' }, { transactionNumber: 'asc' }],
+        include: {
+          document: {
+            select: {
+              documentNumber: true,
+              documentType: true,
+              description: true,
+              referenceType: true,
+              referenceId: true,
+              lines: { select: { notes: true } },
+            },
+          },
+          warehouse: { select: { code: true, nameFa: true } },
+          reversalOf: { select: { transactionNumber: true, type: true } },
+        },
+      })
+    : [];
+
+  // resolve ManufacturingOrder references for real purpose labels
+  const moIds = [
+    ...new Set(
+      txs
+        .map((t) => (t.document?.referenceType === 'MANUFACTURING_ORDER' ? t.document.referenceId : null))
+        .filter((v): v is string => typeof v === 'string'),
+    ),
+  ];
+  const mos = moIds.length
+    ? await db.manufacturingOrder.findMany({ where: { id: { in: moIds } }, select: { id: true, moNumber: true } })
+    : [];
+  const moById = new Map(mos.map((x) => [x.id, x.moNumber]));
+
+  const rows = txs.map((t) => {
+    const isReversal = t.type === 'RECEIPT' && t.reversalOfId !== null;
+    const purpose =
+      t.document?.lines.map((l) => l.notes).find((n) => n && n.trim() !== '')?.trim() ||
+      t.document?.description?.trim() ||
+      '';
+    const ref = t.document?.referenceType === 'MANUFACTURING_ORDER' && t.document.referenceId
+      ? moById.get(t.document.referenceId) ?? 'دستور کار'
+      : t.document?.referenceType ?? '';
+    return {
+      date: isoDate(t.occurredAt),
+      lotNumber: t.lotId ? lotNumberById.get(t.lotId) ?? '' : '',
+      kind: isReversal ? 'ابطال حواله (برگشت به انبار)' : 'مصرف (حواله)',
+      weightKg: isReversal ? `-${fmt(t.weightKg, 3)}` : fmt(t.weightKg, 3),
+      quantity: fmt(t.quantity, 2),
+      documentNumber: t.document?.documentNumber ?? t.transactionNumber,
+      documentType: t.document?.documentType ?? '',
+      purpose,
+      reference: ref,
+      warehouse: t.warehouse.code,
+    };
+  });
+
+  const consumptionRows = txs.filter((t) => t.type === 'ISSUE');
+  const reversalRows = txs.filter((t) => t.type !== 'ISSUE');
+  const totalConsumed = consumptionRows.reduce((a, t) => a.plus(Q(t.weightKg ?? 0)), ZERO);
+  const totalReversed = reversalRows.reduce((a, t) => a.plus(Q(t.weightKg ?? 0)), ZERO);
+  const perLot = new Map<string, D>();
+  for (const t of consumptionRows) {
+    if (!t.lotId) continue;
+    perLot.set(t.lotId, (perLot.get(t.lotId) ?? ZERO).plus(Q(t.weightKg ?? 0)));
+  }
+  const perLotFa = [...perLot.entries()]
+    .map(([id, w]) => `${lotNumberById.get(id) ?? id}: ${fmt(w, 3)} کیلوگرم`)
+    .slice(0, 30);
+
+  const m = meta(
+    { from: f.from, to: f.to, materialId: f.materialId, lotNumber: f.lotNumber },
+    [
+      `تعداد حواله مصرف: ${consumptionRows.length} — جمع مصرف: ${fmt(totalConsumed, 3)} کیلوگرم`,
+      `تعداد ابطال (برگشت به انبار): ${reversalRows.length} — جمع ابطال: ${fmt(totalReversed, 3)} کیلوگرم`,
+      'مصرف خالص هر رول = جمع حواله‌ها − جمع ابطال‌ها؛ این رقم باید با تفاضل وزن دریافتی و باقی‌مانده همان لوت برابر باشد.',
+      ...(perLotFa.length > 0 ? ['مصرف به تفکیک رول:', ...perLotFa] : []),
+    ],
+    period.defaultApplied
+      ? {
+          from: isoDate(period.period.from!),
+          to: isoDate(period.period.to!),
+          basisFa: 'بازه پیش‌فرض: ۳۰ روز گذشته (بدون ورودی کاربر)',
+        }
+      : undefined,
+  );
+
+  return table(
+    'lot-consumption',
+    'ردیابی مصرف رول/لوت',
+    [
+      { key: 'date', labelFa: 'تاریخ', kind: 'INFO' },
+      { key: 'lotNumber', labelFa: 'شماره رول/لوت', kind: 'IDENTIFIER' },
+      { key: 'kind', labelFa: 'نوع', kind: 'INFO' },
+      { key: 'weightKg', labelFa: 'وزن', kind: 'ACTUAL', unit: 'kg' },
+      { key: 'quantity', labelFa: 'مقدار', kind: 'ACTUAL' },
+      { key: 'documentNumber', labelFa: 'سند انبار', kind: 'IDENTIFIER' },
+      { key: 'documentType', labelFa: 'نوع سند', kind: 'IDENTIFIER' },
+      { key: 'purpose', labelFa: 'کاربرد/مقصد', kind: 'INFO' },
+      { key: 'reference', labelFa: 'مرجع', kind: 'INFO' },
+      { key: 'warehouse', labelFa: 'انبار', kind: 'IDENTIFIER' },
+    ],
+    rows,
+    m,
+  );
 }

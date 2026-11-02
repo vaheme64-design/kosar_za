@@ -97,6 +97,7 @@ export function TransferFormPage() {
         items={[
           { to: '/inventory', label: 'داشبورد' },
           { to: '/inventory/transfers/new', label: 'انتقال جدید' },
+          { to: '/inventory/lots', label: 'رول‌ها و لوت‌ها' },
           { to: '/inventory/documents', label: 'سندها' },
         ]}
       />

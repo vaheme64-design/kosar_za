@@ -1,0 +1,1687 @@
+     1→import { Prisma, type InventoryTxType, type StockOwnership, type QualityStatus } from '@prisma/client';
+     2→import { db } from '../../config/db';
+     3→import { ApiError } from '../../lib/http';
+     4→import { recordAudit } from '../../lib/audit';
+     5→import { generateDocumentNumber } from '../../services/documentNumber.service';
+     6→import {
+     7→  createDocumentSchema,
+     8→  createContractSchema,
+     9→  createReservationSchema,
+    10→  lineSchemaFor,
+    11→  qualityReleaseSchema,
+    12→  reverseDocumentSchema,
+    13→  type CreateDocumentInput,
+    14→} from './inventory.schemas';
+    15→
+    16→const D = Prisma.Decimal;
+    17→type Tx = Prisma.TransactionClient;
+    18→type Dec = Prisma.Decimal;
+    19→
+    20→/** Sign of a ledger movement per transaction type (immutable ledger math). */
+    21→const TX_SIGN: Record<InventoryTxType, 1 | -1> = {
+    22→  RECEIPT: 1,
+    23→  TRANSFER_IN: 1,
+    24→  ADJUSTMENT_IN: 1,
+    25→  ISSUE: -1,
+    26→  TRANSFER_OUT: -1,
+    27→  ADJUSTMENT_OUT: -1,
+    28→};
+    29→
+    30→const FLIP_TYPE: Record<InventoryTxType, InventoryTxType> = {
+    31→  RECEIPT: 'ISSUE',
+    32→  ISSUE: 'RECEIPT',
+    33→  TRANSFER_IN: 'TRANSFER_OUT',
+    34→  TRANSFER_OUT: 'TRANSFER_IN',
+    35→  ADJUSTMENT_IN: 'ADJUSTMENT_OUT',
+    36→  ADJUSTMENT_OUT: 'ADJUSTMENT_IN',
+    37→};
+    38→
+    39→/** Balance dimensions — the identity of one StockBalance row. */
+    40→interface BalanceDims {
+    41→  partId: string | null;
+    42→  materialId: string | null;
+    43→  warehouseId: string;
+    44→  locationId: string | null;
+    45→  lotId: string | null;
+    46→  /// balances are tracked per unit of measure (piece vs kilogram)
+    47→  unitId: string;
+    48→  ownership: StockOwnership;
+    49→  qualityStatus: QualityStatus;
+    50→}
+    51→
+    52→function balanceKeyOf(d: BalanceDims): string {
+    53→  return [
+    54→    d.partId ?? '-',
+    55→    d.materialId ?? '-',
+    56→    d.warehouseId,
+    57→    d.locationId ?? '-',
+    58→    d.lotId ?? '-',
+    59→    d.unitId,
+    60→    d.ownership,
+    61→    d.qualityStatus,
+    62→  ].join(':');
+    63→}
+    64→
+    65→function whereOf(d: Omit<BalanceDims, 'warehouseId'> & { warehouseId?: string }): Record<string, unknown> {
+    66→  return {
+    67→    partId: d.partId,
+    68→    materialId: d.materialId,
+    69→    warehouseId: d.warehouseId,
+    70→    locationId: d.locationId,
+    71→    lotId: d.lotId,
+    72→    unitId: d.unitId,
+    73→    ownership: d.ownership,
+    74→    qualityStatus: d.qualityStatus,
+    75→  };
+    76→}
+    77→
+    78→/**
+    79→ * Ledger position for exact dimensions, computed FROM POSTED TRANSACTIONS
+    80→ * (business rule 1 — official balances are a projection of the immutable
+    81→ * ledger, never edited directly). Must be called inside the posting tx.
+    82→ */
+    83→async function ledgerPosition(
+    84→  tx: Tx,
+    85→  d: Omit<BalanceDims, 'warehouseId'> & { warehouseId?: string },
+    86→): Promise<{ quantity: Dec; weightKg: Dec }> {
+    87→  const groups = await tx.inventoryTransaction.groupBy({
+    88→    by: ['type'],
+    89→    where: whereOf(d) as Prisma.InventoryTransactionWhereInput,
+    90→    _sum: { quantity: true, weightKg: true },
+    91→  });
+    92→  let quantity = new D(0);
+    93→  let weightKg = new D(0);
+    94→  for (const g of groups) {
+    95→    const sign = TX_SIGN[g.type];
+    96→    if (g._sum?.quantity) quantity = quantity.plus(new D(g._sum.quantity).mul(sign));
+    97→    if (g._sum?.weightKg) weightKg = weightKg.plus(new D(g._sum.weightKg).mul(sign));
+    98→  }
+    99→  return { quantity, weightKg };
+   100→}
+   101→
+   102→/** Apply a signed movement to the official balance with negative-stock guard. */
+   103→async function applyStockMovement(
+   104→  tx: Tx,
+   105→  dims: BalanceDims,
+   106→  qtyDelta: Dec,
+   107→  weightDelta: Dec,
+   108→  occurredAt: Date,
+   109→): Promise<void> {
+   110→  if (qtyDelta.isNegative() || weightDelta.isNegative()) {
+   111→    // Authoritative check against the ledger (source of truth).
+   112→    const pos = await ledgerPosition(tx, dims);
+   113→    if (pos.quantity.plus(qtyDelta).isNegative()) {
+   114→      throw new ApiError(
+   115→        422,
+   116→        `Insufficient stock: requested ${qtyDelta.abs().toFixed(4)}, available ${pos.quantity.toFixed(4)}`,
+   117→        'موجودی کافی نیست؛ موجودی رسمی منفی نمی‌شود',
+   118→        'negative_stock',
+   119→        { requested: qtyDelta.abs().toFixed(4), available: pos.quantity.toFixed(4) },
+   120→      );
+   121→    }
+   122→    if (pos.weightKg.plus(weightDelta).isNegative()) {
+   123→      throw new ApiError(
+   124→        422,
+   125→        `Insufficient stock weight: requested ${weightDelta.abs().toFixed(4)} kg, available ${pos.weightKg.toFixed(4)} kg`,
+   126→        'وزن کافی نیست؛ موجودی منفی نمی‌شود',
+   127→        'negative_stock_weight',
+   128→        { requestedKg: weightDelta.abs().toFixed(4), availableKg: pos.weightKg.toFixed(4) },
+   129→      );
+   130→    }
+   131→  }
+   132→
+   133→  const key = balanceKeyOf(dims);
+   134→  const existing = await tx.stockBalance.findUnique({ where: { balanceKey: key } });
+   135→  if (existing) {
+   136→    await tx.stockBalance.update({
+   137→      where: { id: existing.id },
+   138→      data: {
+   139→        quantity: new D(existing.quantity).plus(qtyDelta),
+   140→        weightKg: new D(existing.weightKg).plus(weightDelta),
+   141→        lastTransactionAt: occurredAt,
+   142→      },
+   143→    });
+   144→  } else {
+   145→    if (qtyDelta.isNegative() || weightDelta.isNegative()) {
+   146→      throw new ApiError(
+   147→        422,
+   148→        'Cannot remove stock that was never received',
+   149→        'برداشت از موجودی که هرگز ثبت نشده ممکن نیست',
+   150→        'negative_stock',
+   151→      );
+   152→    }
+   153→    await tx.stockBalance.create({
+   154→      data: {
+   155→        partId: dims.partId,
+   156→        materialId: dims.materialId,
+   157→        warehouseId: dims.warehouseId,
+   158→        locationId: dims.locationId,
+   159→        lotId: dims.lotId,
+   160→        unitId: dims.unitId,
+   161→        ownership: dims.ownership,
+   162→        qualityStatus: dims.qualityStatus,
+   163→        balanceKey: key,
+   164→        quantity: qtyDelta,
+   165→        weightKg: weightDelta,
+   166→        lastTransactionAt: occurredAt,
+   167→      },
+   168→    });
+   169→  }
+   170→}
+   171→
+   172→/**
+   173→ * Resolve a document line item (part xor material): validates existence,
+   174→ * resolves the unit (default = item base unit) and derives the weight in kg.
+   175→ * `allowNegative` is only for adjustment lines (negative = decrease).
+   176→ */
+   177→async function resolveLineItem(
+   178→  tx: Tx,
+   179→  line: { partId?: string | null; materialId?: string | null; unitId?: string | null; quantity: string; weightKg?: string | null },
+   180→  allowNegative = false,
+   181→): Promise<{
+   182→  partId: string | null;
+   183→  materialId: string | null;
+   184→  unitId: string;
+   185→  quantity: Dec;
+   186→  weightKg: Dec | null;
+   187→}> {
+   188→  const quantity = new D(line.quantity);
+   189→  if (quantity.comparedTo(0) === 0) {
+   190→    throw new ApiError(422, 'Quantity must be non-zero', 'مقدار نمی‌تواند صفر باشد', 'bad_quantity');
+   191→  }
+   192→  if (!allowNegative && !quantity.isPositive()) {
+   193→    throw new ApiError(422, 'Quantity must be positive', 'مقدار باید مثبت باشد', 'bad_quantity');
+   194→  }
+   195→
+   196→  if (line.partId) {
+   197→    const part = await tx.part.findUnique({ where: { id: line.partId } });
+   198→    if (!part) throw new ApiError(404, 'Part not found', 'قطعه یافت نشد', 'part_not_found');
+   199→    const unitId = line.unitId ?? part.baseUnitId;
+   200→    const unit = await tx.unitOfMeasure.findUnique({ where: { id: unitId } });
+   201→    if (!unit) throw new ApiError(404, 'Unit not found', 'واحد شمارش یافت نشد', 'unit_not_found');
+   202→    const weightKg = line.weightKg != null ? new D(line.weightKg) : part.standardWeightKg ? quantity.mul(new D(part.standardWeightKg)) : null;
+   203→    return { partId: part.id, materialId: null, unitId, quantity, weightKg };
+   204→  }
+   205→
+   206→  const material = await tx.material.findUnique({
+   207→    where: { id: line.materialId! },
+   208→    include: { baseUnit: true },
+   209→  });
+   210→  if (!material) throw new ApiError(404, 'Material not found', 'ماده اولیه یافت نشد', 'material_not_found');
+   211→
+   212→  const unitId = line.unitId ?? material.baseUnitId;
+   213→  const unit = await tx.unitOfMeasure.findUnique({ where: { id: unitId } });
+   214→  if (!unit) throw new ApiError(404, 'Unit not found', 'واحد شمارش یافت نشد', 'unit_not_found');
+   215→
+   216→  let weightKg: Dec;
+   217→  if (line.weightKg != null) {
+   218→    weightKg = new D(line.weightKg);
+   219→  } else if (unit.kind === 'WEIGHT') {
+   220→    weightKg = quantity; // base unit is KG → quantity IS kilograms
+   221→  } else if (material.unitWeightKg) {
+   222→    weightKg = quantity.mul(new D(material.unitWeightKg)); // e.g. sheets × kg/sheet
+   223→  } else {
+   224→    throw new ApiError(
+   225→      422,
+   226→      `Weight cannot be derived for material ${material.materialCode}; provide weightKg explicitly`,
+   227→      'وزن به‌صورت خودکار محاسبه نمی‌شود؛ وزن را صریح وارد کنید',
+   228→      'weight_required',
+   229→    );
+   230→  }
+   231→  return { partId: null, materialId: material.id, unitId, quantity, weightKg };
+   232→}
+   233→
+   234→async function createLedgerTx(
+   235→  tx: Tx,
+   236→  args: {
+   237→    documentId: string;
+   238→    documentLineId: string | null;
+   239→    type: InventoryTxType;
+   240→    partId: string | null;
+   241→    materialId: string | null;
+   242→    warehouseId: string;
+   243→    locationId: string | null;
+   244→    lotId: string | null;
+   245→    ownership: StockOwnership;
+   246→    qualityStatus: QualityStatus;
+   247→    quantity: Dec;
+   248→    unitId: string;
+   249→    weightKg: Dec | null;
+   250→    reversalOfId?: string | null;
+   251→    createdById: string | null;
+   252→  },
+   253→) {
+   254→  const transactionNumber = await generateDocumentNumber(tx, 'TX');
+   255→  return tx.inventoryTransaction.create({
+   256→    data: {
+   257→      transactionNumber,
+   258→      documentId: args.documentId,
+   259→      documentLineId: args.documentLineId,
+   260→      type: args.type,
+   261→      partId: args.partId,
+   262→      materialId: args.materialId,
+   263→      warehouseId: args.warehouseId,
+   264→      locationId: args.locationId,
+   265→      lotId: args.lotId,
+   266→      ownership: args.ownership,
+   267→      qualityStatus: args.qualityStatus,
+   268→      quantity: args.quantity,
+   269→      unitId: args.unitId,
+   270→      weightKg: args.weightKg,
+   271→      reversalOfId: args.reversalOfId ?? null,
+   272→      createdById: args.createdById,
+   273→    },
+   274→  });
+   275→}
+   276→
+   277→interface LotOp {
+   278→  lotId: string;
+   279→  qtyDelta: Dec;
+   280→  weightDelta: Dec;
+   281→}
+   282→
+   283→async function updateLot(tx: Tx, op: LotOp, occurredAt: Date): Promise<void> {
+   284→  const lot = await tx.materialLot.findUnique({ where: { id: op.lotId } });
+   285→  if (!lot) return;
+   286→  const remaining = new D(lot.quantityRemaining).plus(op.qtyDelta);
+   287→  const weightRemaining = new D(lot.weightRemainingKg).plus(op.weightDelta);
+   288→  // receipts also grow the cumulative received counters
+   289→  const receivedQty = op.qtyDelta.isPositive()
+   290→    ? new D(lot.quantityReceived).plus(op.qtyDelta)
+   291→    : new D(lot.quantityReceived);
+   292→  const receivedWeight = op.weightDelta.isPositive()
+   293→    ? new D(lot.weightReceivedKg).plus(op.weightDelta)
+   294→    : new D(lot.weightReceivedKg);
+   295→  await tx.materialLot.update({
+   296→    where: { id: lot.id },
+   297→    data: {
+   298→      quantityReceived: receivedQty,
+   299→      quantityRemaining: remaining,
+   300→      weightReceivedKg: receivedWeight,
+   301→      weightRemainingKg: weightRemaining,
+   302→      status: remaining.comparedTo(0) <= 0 ? 'CLOSED' : lot.status === 'BLOCKED' ? 'BLOCKED' : 'OPEN',
+   303→    },
+   304→  });
+   305→  void occurredAt;
+   306→}
+   307→
+   308→async function refreshContractStatus(tx: Tx, contractId: string): Promise<void> {
+   309→  const contract = await tx.materialContract.findUnique({ where: { id: contractId } });
+   310→  if (!contract) return;
+   311→  const agg = await tx.materialContractTransaction.aggregate({
+   312→    where: { contractId },
+   313→    _sum: { quantity: true },
+   314→  });
+   315→  const received = agg._sum.quantity ? new D(agg._sum.quantity) : new D(0);
+   316→  const total = new D(contract.totalQuantity);
+   317→  let status: 'OPEN' | 'PARTIALLY_RECEIVED' | 'COMPLETED' = 'OPEN';
+   318→  if (received.comparedTo(0) > 0 && received.comparedTo(total) < 0) status = 'PARTIALLY_RECEIVED';
+   319→  if (received.comparedTo(total) >= 0) status = 'COMPLETED';
+   320→  await tx.materialContract.update({ where: { id: contractId }, data: { status } });
+   321→}
+   322→
+   323→async function consumeReservation(tx: Tx, reservationId: string, qty: Dec): Promise<void> {
+   324→  const res = await tx.inventoryReservation.findUnique({ where: { id: reservationId } });
+   325→  if (!res) return;
+   326→  const remaining = new D(res.quantity).minus(qty);
+   327→  await tx.inventoryReservation.update({
+   328→    where: { id: reservationId },
+   329→    data: {
+   330→      quantity: remaining.comparedTo(0) <= 0 ? new D(0) : remaining,
+   331→      status: remaining.comparedTo(0) <= 0 ? 'CONSUMED' : 'ACTIVE',
+   332→    },
+   333→  });
+   334→}
+   335→
+   336→// ---------------------------------------------------------------------------
+   337→// document creation (DRAFT — never affects stock; business rule 2)
+   338→// ---------------------------------------------------------------------------
+   339→
+   340→export async function createDocument(input: CreateDocumentInput, userId: string, meta: { ip?: string; ua?: string }) {
+   341→  const parsed = createDocumentSchema.parse(input);
+   342→  const allowNegative = parsed.documentType === 'ADJUSTMENT';
+   343→
+   344→  const document = await db.$transaction(async (tx) => {
+   345→    // resolve + normalize every line up-front (unit, weight, item existence)
+   346→    const resolvedLines = [];
+   347→    for (const raw of parsed.lines) {
+   348→      const line = lineSchemaFor(parsed.documentType).parse(raw);
+   349→      const item = await resolveLineItem(tx, line as never, allowNegative);
+   350→      resolvedLines.push({ line, item });
+   351→    }
+   352→
+   353→    const documentNumber = await generateDocumentNumber(tx, 'INV');
+   354→    const doc = await tx.inventoryDocument.create({
+   355→      data: {
+   356→        documentNumber,
+   357→        documentType: parsed.documentType,
+   358→        status: 'DRAFT',
+   359→        postingStatus: 'UNPOSTED',
+   360→        documentDate: new Date(`${parsed.documentDate}T00:00:00Z`),
+   361→        warehouseId: parsed.warehouseId,
+   362→        referenceType: parsed.referenceType,
+   363→        referenceId: parsed.referenceId,
+   364→        description: parsed.description ?? null,
+   365→        reasonCode: parsed.reasonCode ?? null,
+   366→        reasonText: parsed.reasonText ?? null,
+   367→        createdById: userId,
+   368→        lines: {
+   369→          create: resolvedLines.map(({ line, item }, i) => ({
+   370→            lineNo: i + 1,
+   371→            partId: item.partId,
+   372→            materialId: item.materialId,
+   373→            lotId: (line as { lotId?: string }).lotId ?? null,
+   374→            lotNumber: (line as { lotNumber?: string }).lotNumber ?? null,
+   375→            quantity: item.quantity,
+   376→            unitId: item.unitId,
+   377→            weightKg: item.weightKg,
+   378→            fromLocationId: (line as { fromLocationId?: string }).fromLocationId ?? (line as { locationId?: string }).locationId ?? null,
+   379→            toLocationId: (line as { toLocationId?: string }).toLocationId ?? (line as { locationId?: string }).locationId ?? null,
+   380→            contractId: (line as { contractId?: string }).contractId ?? null,
+   381→            reservationId: (line as { reservationId?: string }).reservationId ?? null,
+   382→            ownership: (line as { ownership?: StockOwnership }).ownership ?? null,
+   383→            qualityStatus: (line as { qualityStatus?: QualityStatus }).qualityStatus ?? null,
+   384→            notes: (line as { notes?: string }).notes ?? null,
+   385→          })),
+   386→        },
+   387→      },
+   388→      include: { lines: true },
+   389→    });
+   390→    await recordAudit(tx, {
+   391→      userId,
+   392→      action: 'CREATE',
+   393→      entityType: 'InventoryDocument',
+   394→      entityId: doc.id,
+   395→      changes: { documentType: doc.documentType, lines: doc.lines.length },
+   396→      ipAddress: meta.ip,
+   397→      userAgent: meta.ua,
+   398→    });
+   399→    return doc;
+   400→  });
+   401→
+   402→  return document;
+   403→}
+   404→
+   405→export async function getDocument(id: string) {
+   406→  const doc = await db.inventoryDocument.findUnique({
+   407→    where: { id },
+   408→    include: {
+   409→      warehouse: true,
+   410→      createdBy: { select: { fullName: true, username: true } },
+   411→      postedBy: { select: { fullName: true, username: true } },
+   412→      reversalOf: { select: { id: true, documentNumber: true } },
+   413→      reversals: { select: { id: true, documentNumber: true, postingStatus: true } },
+   414→      lines: {
+   415→        orderBy: { lineNo: 'asc' },
+   416→        include: {
+   417→          part: { select: { partNumber: true, nameFa: true } },
+   418→          material: { select: { materialCode: true, nameFa: true } },
+   419→          lot: { select: { lotNumber: true } },
+   420→          unit: { select: { code: true, nameFa: true } },
+   421→          fromLocation: { select: { code: true, nameFa: true } },
+   422→          toLocation: { select: { code: true, nameFa: true } },
+   423→          contract: { select: { contractNumber: true } },
+   424→          transactions: { select: { id: true, transactionNumber: true, type: true } },
+   425→        },
+   426→      },
+   427→    },
+   428→  });
+   429→  if (!doc) throw new ApiError(404, 'Document not found', 'سند یافت نشد', 'document_not_found');
+   430→  return doc;
+   431→}
+   432→
+   433→export async function listDocuments(filters: { documentType?: string; status?: string; postingStatus?: string; take?: number }) {
+   434→  return db.inventoryDocument.findMany({
+   435→    where: {
+   436→      documentType: filters.documentType as never,
+   437→      status: filters.status as never,
+   438→      postingStatus: filters.postingStatus as never,
+   439→    },
+   440→    orderBy: { createdAt: 'desc' },
+   441→    take: filters.take ?? 100,
+   442→    include: {
+   443→      warehouse: { select: { code: true, nameFa: true } },
+   444→      createdBy: { select: { fullName: true } },
+   445→      _count: { select: { lines: true } },
+   446→    },
+   447→  });
+   448→}
+   449→
+   450→export async function cancelDocument(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   451→  return db.$transaction(async (tx) => {
+   452→    const doc = await tx.inventoryDocument.findUnique({ where: { id } });
+   453→    if (!doc) throw new ApiError(404, 'Document not found', 'سند یافت نشد', 'document_not_found');
+   454→    if (doc.postingStatus !== 'UNPOSTED') {
+   455→      throw new ApiError(
+   456→        409,
+   457→        'Posted documents cannot be cancelled — use a reversal document',
+   458→        'سند قطع‌بوش‌شده قابل ابطال نیست؛ از سند ابطالی استفاده کنید',
+   459→        'doc_already_posted',
+   460→      );
+   461→    }
+   462→    const updated = await tx.inventoryDocument.update({ where: { id }, data: { status: 'CANCELLED' } });
+   463→    await recordAudit(tx, {
+   464→      userId,
+   465→      action: 'CANCEL',
+   466→      entityType: 'InventoryDocument',
+   467→      entityId: id,
+   468→      ipAddress: meta.ip,
+   469→      userAgent: meta.ua,
+   470→    });
+   471→    return updated;
+   472→  });
+   473→}
+   474→
+   475→// ---------------------------------------------------------------------------
+   476→// POSTING — atomic; the only place the ledger and official balances change
+   477→// ---------------------------------------------------------------------------
+   478→
+   479→interface Movement {
+   480→  lineDbId: string;
+   481→  type: InventoryTxType;
+   482→  partId: string | null;
+   483→  materialId: string | null;
+   484→  warehouseId: string;
+   485→  locationId: string | null;
+   486→  lotId: string | null;
+   487→  unitId: string;
+   488→  ownership: StockOwnership;
+   489→  qualityStatus: QualityStatus;
+   490→  quantity: Dec; // always positive — direction comes from type
+   491→  weightKg: Dec | null; // always positive
+   492→  lotOp?: LotOp | null;
+   493→  contractTx?: { contractId: string; quantity: Dec; weightKg: Dec | null; lotId: string | null } | null;
+   494→  reservationId?: string | null;
+   495→  reservationQty?: Dec | null;
+   496→}
+   497→
+   498→type DocWithLines = Prisma.InventoryDocumentGetPayload<{ include: { lines: true } }>;
+   499→
+   500→export async function postDocument(id: string, userId: string, meta: { ip?: string; ua?: string }) {
+   501→  return db.$transaction(
+   502→    async (tx) => {
+   503→      const doc = await tx.inventoryDocument.findUnique({
+   504→        where: { id },
+   505→        include: { lines: { orderBy: { lineNo: 'asc' } } },
+   506→      });
+   507→      if (!doc) throw new ApiError(404, 'Document not found', 'سند یافت نشد', 'document_not_found');
+   508→      if (doc.status === 'CANCELLED') {
+   509→        throw new ApiError(409, 'Cancelled documents cannot be posted', 'سند ابطال‌شده قابل قطع‌بوش نیست', 'doc_cancelled');
+   510→      }
+   511→
+   512→      // ---- duplicate-posting guard: atomic conditional update (rule 4) ----
+   513→      const guarded = await tx.inventoryDocument.updateMany({
+   514→        where: { id, postingStatus: 'UNPOSTED' },
+   515→        data: { status: 'CONFIRMED', postingStatus: 'POSTED', postedById: userId, postedAt: new Date() },
+   516→      });
+   517→      if (guarded.count === 0) {
+   518→        throw new ApiError(
+   519→          409,
+   520→          `Document ${doc.documentNumber} is already posted`,
+   521→          'این سند قبلاً قطع‌بوش شده است',
+   522→          'duplicate_posting',
+   523→        );
+   524→      }
+   525→
+   526→      const occurredAt = new Date();
+   527→      const movements: Movement[] = [];
+   528→
+   529→      for (const line of doc.lines) {
+   530→        const allowNegative = doc.documentType === 'ADJUSTMENT';
+   531→        const item = await resolveLineItem(
+   532→          tx,
+   533→          {
+   534→            partId: line.partId,
+   535→            materialId: line.materialId,
+   536→            unitId: line.unitId,
+   537→            quantity: String(line.quantity),
+   538→            weightKg: line.weightKg != null ? String(line.weightKg) : null,
+   539→          },
+   540→          allowNegative,
+   541→        );
+   542→
+   543→        switch (doc.documentType) {
+   544→          case 'RECEIPT':
+   545→          case 'PRODUCTION_RECEIPT':
+   546→            await buildReceiptMovement(tx, doc, line, item, movements);
+   547→            break;
+   548→          case 'ISSUE':
+   549→          case 'PRODUCTION_ISSUE':
+   550→          case 'SCRAP_DISPOSAL':
+   551→            await buildIssueMovement(tx, doc, line, item, movements);
+   552→            break;
+   553→          case 'TRANSFER':
+   554→            await buildTransferMovement(tx, doc, line, item, movements);
+   555→            break;
+   556→          case 'ADJUSTMENT':
+   557→            await buildAdjustmentMovement(tx, doc, line, item, movements, doc.warehouseId);
+   558→            break;
+   559→        }
+   560→      }
+   561→
+   562→      // ---- write ledger transactions + balances atomically ----
+   563→      // NOTE: apply the balance movement BEFORE writing its own ledger row so
+   564→      // the negative-stock check measures the position excluding this document.
+   565→      for (const m of movements) {
+   566→        const sign = TX_SIGN[m.type];
+   567→        await applyStockMovement(
+   568→          tx,
+   569→          {
+   570→            partId: m.partId,
+   571→            materialId: m.materialId,
+   572→            warehouseId: m.warehouseId,
+   573→            locationId: m.locationId,
+   574→            lotId: m.lotId,
+   575→            unitId: m.unitId,
+   576→            ownership: m.ownership,
+   577→            qualityStatus: m.qualityStatus,
+   578→          },
+   579→          new D(sign).mul(m.quantity),
+   580→          m.weightKg ? new D(sign).mul(m.weightKg) : new D(0),
+   581→          occurredAt,
+   582→        );
+   583→        await createLedgerTx(tx, {
+   584→          documentId: doc.id,
+   585→          documentLineId: m.lineDbId,
+   586→          type: m.type,
+   587→          partId: m.partId,
+   588→          materialId: m.materialId,
+   589→          warehouseId: m.warehouseId,
+   590→          locationId: m.locationId,
+   591→          lotId: m.lotId,
+   592→          ownership: m.ownership,
+   593→          qualityStatus: m.qualityStatus,
+   594→          quantity: m.quantity,
+   595→          unitId: m.unitId,
+   596→          weightKg: m.weightKg,
+   597→          createdById: userId,
+   598→        });
+   599→
+   600→        if (m.lotOp) await updateLot(tx, m.lotOp, occurredAt);
+   601→
+   602→        if (m.contractTx) {
+   603→          await tx.materialContractTransaction.create({
+   604→            data: {
+   605→              contractId: m.contractTx.contractId,
+   606→              receivedDate: doc.documentDate,
+   607→              quantity: m.contractTx.quantity,
+   608→              weightKg: m.contractTx.weightKg,
+   609→              lotId: m.contractTx.lotId,
+   610→              inventoryDocumentId: doc.id,
+   611→              notes: doc.reversalOfId ? 'سند ابطالی' : null,
+   612→            },
+   613→          });
+   614→          await refreshContractStatus(tx, m.contractTx.contractId);
+   615→        }
+   616→
+   617→        if (m.reservationId && m.reservationQty) {
+   618→          await consumeReservation(tx, m.reservationId, m.reservationQty);
+   619→        }
+   620→      }
+   621→
+   622→      await recordAudit(tx, {
+   623→        userId,
+   624→        action: 'POST',
+   625→        entityType: 'InventoryDocument',
+   626→        entityId: doc.id,
+   627→        changes: {
+   628→          documentNumber: doc.documentNumber,
+   629→          documentType: doc.documentType,
+   630→          movements: movements.length,
+   631→          reasonCode: doc.reasonCode,
+   632→          reasonText: doc.reasonText,
+   633→          reversalOf: doc.reversalOfId,
+   634→        },
+   635→        ipAddress: meta.ip,
+   636→        userAgent: meta.ua,
+   637→      });
+   638→
+   639→      return tx.inventoryDocument.findUnique({
+   640→        where: { id: doc.id },
+   641→        include: { transactions: true, lines: true },
+   642→      });
+   643→    },
+   644→    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000 },
+   645→  );
+   646→}
+   647→
+   648→async function buildReceiptMovement(
+   649→  tx: Tx,
+   650→  doc: DocWithLines,
+   651→  line: DocWithLines['lines'][number],
+   652→  item: Awaited<ReturnType<typeof resolveLineItem>>,
+   653→  movements: Movement[],
+   654→): Promise<void> {
+   655→  let lotId: string | null = null;
+   656→  let ownership: StockOwnership = line.ownership ?? (line.contractId ? 'SUPPLIER_CONSIGNMENT' : 'OWNED');
+   657→
+   658→  if (item.materialId) {
+   659→    if (line.lotId) {
+   660→      const lot = await tx.materialLot.findUnique({ where: { id: line.lotId } });
+   661→      if (!lot) throw new ApiError(404, 'Lot not found', 'لوت یافت نشد', 'lot_not_found');
+   662→      if (lot.materialId !== item.materialId) {
+   663→        throw new ApiError(422, 'Lot belongs to a different material', 'لوت متعلق به ماده اولیه دیگری است', 'lot_material_mismatch');
+   664→      }
+   665→      lotId = lot.id;
+   666→      ownership = line.ownership ?? lot.ownership;
+   667→    } else if (line.lotNumber) {
+   668→      const existing = await tx.materialLot.findUnique({
+   669→        where: { materialId_lotNumber: { materialId: item.materialId, lotNumber: line.lotNumber } },
+   670→      });
+   671→      if (existing) {
+   672→        lotId = existing.id;
+   673→        ownership = line.ownership ?? existing.ownership;
+   674→      } else {
+   675→        const lot = await tx.materialLot.create({
+   676→          data: {
+   677→            materialId: item.materialId,
+   678→            lotNumber: line.lotNumber,
+   679→            receiptDate: doc.documentDate,
+   680→            quantityReceived: 0,
+   681→            quantityRemaining: 0,
+   682→            weightReceivedKg: 0,
+   683→            weightRemainingKg: 0,
+   684→            ownership,
+   685→          },
+   686→        });
+   687→        lotId = lot.id;
+   688→      }
+   689→    } else {
+   690→      throw new ApiError(
+   691→        422,
+   692→        'Material receipts require a lot (lotId or lotNumber)',
+   693→        'رسید ماده اولیه نیازمند شماره لوت است',
+   694→        'lot_required',
+   695→      );
+   696→    }
+   697→    if (line.contractId) {
+   698→      const contract = await tx.materialContract.findUnique({ where: { id: line.contractId } });
+   699→      if (!contract) throw new ApiError(404, 'Contract not found', 'قرارداد یافت نشد', 'contract_not_found');
+   700→      if (contract.materialId !== item.materialId) {
+   701→        throw new ApiError(422, 'Contract is for a different material', 'قرارداد متعلق به ماده اولیه دیگری است', 'contract_material_mismatch');
+   702→      }
+   703→    }
+   704→  }
+   705→
+   706→  movements.push({
+   707→    lineDbId: line.id,
+   708→    type: 'RECEIPT',
+   709→    partId: item.partId,
+   710→    materialId: item.materialId,
+   711→    warehouseId: doc.warehouseId,
+   712→    locationId: line.toLocationId,
+   713→    lotId,
+   714→    unitId: item.unitId,
+   715→    ownership,
+   716→    qualityStatus: line.qualityStatus ?? 'APPROVED',
+   717→    quantity: item.quantity,
+   718→    weightKg: item.weightKg,
+   719→    lotOp: lotId ? { lotId, qtyDelta: item.quantity, weightDelta: item.weightKg ?? new D(0) } : null,
+   720→    contractTx: line.contractId
+   721→      ? { contractId: line.contractId, quantity: item.quantity, weightKg: item.weightKg, lotId }
+   722→      : null,
+   723→  });
+   724→}
+   725→
+   726→async function buildIssueMovement(
+   727→  tx: Tx,
+   728→  doc: DocWithLines,
+   729→  line: DocWithLines['lines'][number],
+   730→  item: Awaited<ReturnType<typeof resolveLineItem>>,
+   731→  movements: Movement[],
+   732→): Promise<void> {
+   733→  let lotId: string | null = null;
+   734→  let ownership: StockOwnership = 'OWNED';
+   735→  if (item.materialId) {
+   736→    if (!line.lotId) {
+   737→      throw new ApiError(
+   738→        422,
+   739→        'Material issues must reference a lot (lotId)',
+   740→        'حواله ماده اولیه باید شماره لوت داشته باشد',
+   741→        'lot_required',
+   742→      );
+   743→    }
+   744→    const lot = await tx.materialLot.findUnique({ where: { id: line.lotId } });
+   745→    if (!lot) throw new ApiError(404, 'Lot not found', 'لوت یافت نشد', 'lot_not_found');
+   746→    if (lot.materialId !== item.materialId) {
+   747→      throw new ApiError(422, 'Lot belongs to a different material', 'لوت متعلق به ماده اولیه دیگری است', 'lot_material_mismatch');
+   748→    }
+   749→    lotId = lot.id;
+   750→    ownership = lot.ownership;
+   751→  }
+   752→
+   753→  let reservationId: string | null = null;
+   754→  let reservationQty: Dec | null = null;
+   755→  if (line.reservationId) {
+   756→    const res = await tx.inventoryReservation.findUnique({ where: { id: line.reservationId } });
+   757→    if (!res) throw new ApiError(404, 'Reservation not found', 'رزرو یافت نشد', 'reservation_not_found');
+   758→    if (res.status !== 'ACTIVE') {
+   759→      throw new ApiError(409, 'Reservation is not active', 'رزرو فعال نیست', 'reservation_inactive');
+   760→    }
+   761→    const sameItem = res.partId ? res.partId === item.partId : res.materialId === item.materialId;
+   762→    if (!sameItem) {
+   763→      throw new ApiError(422, 'Reservation is for a different item', 'رزرو متعلق به قلم دیگری است', 'reservation_item_mismatch');
+   764→    }
+   765→    if (res.warehouseId && res.warehouseId !== doc.warehouseId) {
+   766→      throw new ApiError(422, 'Reservation is for a different warehouse', 'رزرو متعلق به انبار دیگری است', 'reservation_warehouse_mismatch');
+   767→    }
+   768→    if (res.unitId !== item.unitId) {
+   769→      throw new ApiError(422, 'Reservation unit differs from the issue unit', 'واحد رزرو با واحد حواله متفاوت است', 'reservation_unit_mismatch');
+   770→    }
+   771→    reservationId = res.id;
+   772→    reservationQty = item.quantity;
+   773→  }
+   774→
+   775→  movements.push({
+   776→    lineDbId: line.id,
+   777→    type: 'ISSUE',
+   778→    partId: item.partId,
+   779→    materialId: item.materialId,
+   780→    warehouseId: doc.warehouseId,
+   781→    locationId: line.fromLocationId,
+   782→    lotId,
+   783→    unitId: item.unitId,
+   784→    ownership,
+   785→    qualityStatus: 'APPROVED',
+   786→    quantity: item.quantity,
+   787→    weightKg: item.weightKg,
+   788→    lotOp: lotId ? { lotId, qtyDelta: item.quantity.neg(), weightDelta: (item.weightKg ?? new D(0)).neg() } : null,
+   789→    reservationId,
+   790→    reservationQty,
+   791→  });
+   792→}
+   793→
+   794→async function buildTransferMovement(
+   795→  tx: Tx,
+   796→  doc: DocWithLines,
+   797→  line: DocWithLines['lines'][number],
+   798→  item: Awaited<ReturnType<typeof resolveLineItem>>,
+   799→  movements: Movement[],
+   800→): Promise<void> {
+   801→  let lotId: string | null = null;
+   802→  let ownership: StockOwnership = 'OWNED';
+   803→  if (item.materialId) {
+   804→    if (!line.lotId) {
+   805→      throw new ApiError(422, 'Material transfers must reference a lot', 'انتقال ماده اولیه نیازمند لوت است', 'lot_required');
+   806→    }
+   807→    const lot = await tx.materialLot.findUnique({ where: { id: line.lotId } });
+   808→    if (!lot) throw new ApiError(404, 'Lot not found', 'لوت یافت نشد', 'lot_not_found');
+   809→    if (lot.materialId !== item.materialId) {
+   810→      throw new ApiError(422, 'Lot belongs to a different material', 'لوت متعلق به ماده اولیه دیگری است', 'lot_material_mismatch');
+   811→    }
+   812→    lotId = lot.id;
+   813→    ownership = lot.ownership;
+   814→  }
+   815→
+   816→  const destLocation = await tx.warehouseLocation.findUnique({ where: { id: line.toLocationId! } });
+   817→  if (!destLocation) throw new ApiError(404, 'Destination location not found', 'موقعیت مقصد یافت نشد', 'location_not_found');
+   818→  if (destLocation.warehouseId === doc.warehouseId && line.fromLocationId === destLocation.id) {
+   819→    throw new ApiError(422, 'Source and destination must differ', 'مبدأ و مقصد باید متفاوت باشند', 'same_location');
+   820→  }
+   821→
+   822→  const common = {
+   823→    lineDbId: line.id,
+   824→    partId: item.partId,
+   825→    materialId: item.materialId,
+   826→    lotId,
+   827→    unitId: item.unitId,
+   828→    ownership,
+   829→    qualityStatus: 'APPROVED' as QualityStatus,
+   830→    quantity: item.quantity,
+   831→    weightKg: item.weightKg,
+   832→  };
+   833→
+   834→  movements.push({
+   835→    ...common,
+   836→    type: 'TRANSFER_OUT',
+   837→    warehouseId: doc.warehouseId,
+   838→    locationId: line.fromLocationId,
+   839→    lotOp: lotId ? { lotId, qtyDelta: item.quantity.neg(), weightDelta: (item.weightKg ?? new D(0)).neg() } : null,
+   840→  });
+   841→  movements.push({
+   842→    ...common,
+   843→    type: 'TRANSFER_IN',
+   844→    warehouseId: destLocation.warehouseId,
+   845→    locationId: destLocation.id,
+   846→    lotOp: null,
+   847→  });
+   848→}
+   849→
+   850→async function buildAdjustmentMovement(
+   851→  tx: Tx,
+   852→  doc: DocWithLines,
+   853→  line: DocWithLines['lines'][number],
+   854→  item: Awaited<ReturnType<typeof resolveLineItem>>,
+   855→  movements: Movement[],
+   856→  warehouseId: string,
+   857→): Promise<void> {
+   858→  const qty = item.quantity; // signed: negative = decrease
+   859→  const weight = item.weightKg ?? new D(0);
+   860→  const increase = qty.isPositive();
+   861→
+   862→  let lotId: string | null = line.lotId;
+   863→  let ownership: StockOwnership = line.ownership ?? 'OWNED';
+   864→  if (item.materialId) {
+   865→    if (!lotId && line.lotNumber) {
+   866→      const existing = await tx.materialLot.findUnique({
+   867→        where: { materialId_lotNumber: { materialId: item.materialId, lotNumber: line.lotNumber } },
+   868→      });
+   869→      if (existing) {
+   870→        lotId = existing.id;
+   871→        ownership = line.ownership ?? existing.ownership;
+   872→      } else {
+   873→        const lot = await tx.materialLot.create({
+   874→          data: {
+   875→            materialId: item.materialId,
+   876→            lotNumber: line.lotNumber,
+   877→            receiptDate: doc.documentDate,
+   878→            quantityReceived: 0,
+   879→            quantityRemaining: 0,
+   880→            weightReceivedKg: 0,
+   881→            weightRemainingKg: 0,
+   882→            ownership,
+   883→          },
+   884→        });
+   885→        lotId = lot.id;
+   886→      }
+   887→    }
+   888→    if (!lotId) {
+   889→      throw new ApiError(422, 'Material adjustments require a lot', 'اصلاحیه ماده اولیه نیازمند لوت است', 'lot_required');
+   890→    }
+   891→    const lot = await tx.materialLot.findUnique({ where: { id: lotId } });
+   892→    if (!lot) throw new ApiError(404, 'Lot not found', 'لوت یافت نشد', 'lot_not_found');
+   893→    if (lot.materialId !== item.materialId) {
+   894→      throw new ApiError(422, 'Lot belongs to a different material', 'لوت متعلق به ماده اولیه دیگری است', 'lot_material_mismatch');
+   895→    }
+   896→    ownership = line.ownership ?? lot.ownership;
+   897→  }
+   898→
+   899→  movements.push({
+   900→    lineDbId: line.id,
+   901→    type: increase ? 'ADJUSTMENT_IN' : 'ADJUSTMENT_OUT',
+   902→    partId: item.partId,
+   903→    materialId: item.materialId,
+   904→    warehouseId,
+   905→    locationId: line.toLocationId ?? line.fromLocationId,
+   906→    lotId,
+   907→    unitId: item.unitId,
+   908→    ownership,
+   909→    qualityStatus: line.qualityStatus ?? 'APPROVED',
+   910→    quantity: increase ? qty : qty.neg(),
+   911→    weightKg: increase ? weight : weight.neg(),
+   912→    lotOp: lotId ? { lotId, qtyDelta: qty, weightDelta: weight } : null,
+   913→  });
+   914→  void tx;
+   915→}
+   916→
+   917→// ---------------------------------------------------------------------------
+   918→// REVERSAL — corrections always through reversal documents (rule 10)
+   919→// ---------------------------------------------------------------------------
+   920→
+   921→export async function reverseDocument(id: string, userId: string, reason: string, meta: { ip?: string; ua?: string }) {
+   922→  const parsed = reverseDocumentSchema.parse({ reason });
+   923→
+   924→  return db.$transaction(
+   925→    async (tx) => {
+   926→      const original = await tx.inventoryDocument.findUnique({
+   927→        where: { id },
+   928→        include: { lines: { orderBy: { lineNo: 'asc' } } },
+   929→      });
+   930→      if (!original) throw new ApiError(404, 'Document not found', 'سند یافت نشد', 'document_not_found');
+   931→      if (original.postingStatus === 'UNPOSTED') {
+   932→        throw new ApiError(409, 'Draft documents are cancelled, not reversed', 'سند پیش‌نویس ابطال می‌شود نه ابطال قطع‌بوش', 'doc_not_posted');
+   933→      }
+   934→      if (original.postingStatus === 'REVERSED') {
+   935→        throw new ApiError(409, 'Document is already reversed', 'این سند قبلاً ابطال شده است', 'already_reversed');
+   936→      }
+   937→      if (original.reversalOfId != null) {
+   938→        throw new ApiError(409, 'Reversal documents cannot be reversed', 'سند ابطالی قابل ابطال مجدد نیست', 'reversal_of_reversal');
+   939→      }
+   940→
+   941→      // mark original reversed (guarded)
+   942→      const guarded = await tx.inventoryDocument.updateMany({
+   943→        where: { id, postingStatus: 'POSTED' },
+   944→        data: { postingStatus: 'REVERSED' },
+   945→      });
+   946→      if (guarded.count === 0) {
+   947→        throw new ApiError(409, 'Document state changed concurrently', 'وضعیت سند هم‌زمان تغییر کرده است', 'conflict');
+   948→      }
+   949→
+   950→      // reversal document shell
+   951→      const documentNumber = await generateDocumentNumber(tx, 'INV');
+   952→      const reversalDoc = await tx.inventoryDocument.create({
+   953→        data: {
+   954→          documentNumber,
+   955→          documentType: original.documentType,
+   956→          status: 'CONFIRMED',
+   957→          postingStatus: 'UNPOSTED',
+   958→          documentDate: new Date(),
+   959→          warehouseId: original.warehouseId,
+   960→          description: `ابطال سند ${original.documentNumber} — ${parsed.reason}`,
+   961→          reasonCode: 'OTHER',
+   962→          reasonText: parsed.reason,
+   963→          createdById: userId,
+   964→          reversalOfId: original.id,
+   965→          lines: {
+   966→            create: original.lines.map((l) => ({
+   967→              lineNo: l.lineNo,
+   968→              partId: l.partId,
+   969→              materialId: l.materialId,
+   970→              lotId: l.lotId,
+   971→              lotNumber: null,
+   972→              quantity: new D(l.quantity).abs(),
+   973→              unitId: l.unitId,
+   974→              weightKg: l.weightKg ? new D(l.weightKg).abs() : null,
+   975→              fromLocationId: l.toLocationId, // mirrored
+   976→              toLocationId: l.fromLocationId,
+   977→              contractId: l.contractId,
+   978→              reservationId: null,
+   979→              ownership: l.ownership,
+   980→              qualityStatus: l.qualityStatus,
+   981→              notes: `ابطال ${original.documentNumber}`,
+   982→            })),
+   983→          },
+   984→        },
+   985→        include: { lines: true },
+   986→      });
+   987→
+   988→      // map original line id → reversal line id (mirrored by lineNo)
+   989→      const reversalLineByOriginalLine = new Map<string, string>();
+   990→      for (const ol of original.lines) {
+   991→        const rl = reversalDoc.lines.find((l) => l.lineNo === ol.lineNo);
+   992→        if (rl) reversalLineByOriginalLine.set(ol.id, rl.id);
+   993→      }
+   994→
+   995→      // mirror every original transaction with flipped type, same dimensions
+   996→      const originalTxs = await tx.inventoryTransaction.findMany({ where: { documentId: original.id } });
+   997→      if (originalTxs.length === 0) {
+   998→        throw new ApiError(500, 'Original document has no transactions', 'سند اصلی تراکنشی ندارد', 'reversal_no_tx');
+   999→      }
+  1000→      const occurredAt = new Date();
+  1001→      for (const t of originalTxs) {
+  1002→        const flipType = FLIP_TYPE[t.type];
+  1003→        const sign = TX_SIGN[flipType];
+  1004→        const qty = new D(t.quantity).abs();
+  1005→        const weight = t.weightKg ? new D(t.weightKg).abs() : null;
+  1006→        const dims = {
+  1007→          partId: t.partId,
+  1008→          materialId: t.materialId,
+  1009→          warehouseId: t.warehouseId,
+  1010→          locationId: t.locationId,
+  1011→          lotId: t.lotId,
+  1012→          unitId: t.unitId,
+  1013→          ownership: t.ownership,
+  1014→          qualityStatus: t.qualityStatus,
+  1015→        };
+  1016→        // apply the balance movement BEFORE writing the flipped ledger row so
+  1017→        // the negative-stock check sees only the original ledger
+  1018→        await applyStockMovement(
+  1019→          tx,
+  1020→          dims,
+  1021→          new D(sign).mul(qty),
+  1022→          weight ? new D(sign).mul(weight) : new D(0),
+  1023→          occurredAt,
+  1024→        );
+  1025→        await createLedgerTx(tx, {
+  1026→          documentId: reversalDoc.id,
+  1027→          documentLineId: t.documentLineId ? reversalLineByOriginalLine.get(t.documentLineId) ?? null : null,
+  1028→          type: flipType,
+  1029→          partId: t.partId,
+  1030→          materialId: t.materialId,
+  1031→          warehouseId: t.warehouseId,
+  1032→          locationId: t.locationId,
+  1033→          lotId: t.lotId,
+  1034→          ownership: t.ownership,
+  1035→          qualityStatus: t.qualityStatus,
+  1036→          quantity: qty,
+  1037→          unitId: t.unitId,
+  1038→          weightKg: weight,
+  1039→          reversalOfId: t.id,
+  1040→          createdById: userId,
+  1041→        });
+  1042→        if (t.lotId) {
+  1043→          await updateLot(
+  1044→            tx,
+  1045→            {
+  1046→              lotId: t.lotId,
+  1047→              qtyDelta: new D(sign).mul(qty),
+  1048→              weightDelta: weight ? new D(sign).mul(weight) : new D(0),
+  1049→            },
+  1050→            occurredAt,
+  1051→          );
+  1052→        }
+  1053→      }
+  1054→
+  1055→      // restore consumed reservations of the original issue lines
+  1056→      for (const line of original.lines) {
+  1057→        if (line.reservationId) {
+  1058→          const res = await tx.inventoryReservation.findUnique({ where: { id: line.reservationId } });
+  1059→          if (res) {
+  1060→            const restored = new D(res.quantity).plus(new D(line.quantity).abs());
+  1061→            await tx.inventoryReservation.update({
+  1062→              where: { id: res.id },
+  1063→              data: { quantity: restored, status: 'ACTIVE' },
+  1064→            });
+  1065→          }
+  1066→        }
+  1067→      }
+  1068→
+  1069→      // negative contract-ledger entries for receipt lines with contracts
+  1070→      for (const line of original.lines) {
+  1071→        if (line.contractId) {
+  1072→          await tx.materialContractTransaction.create({
+  1073→            data: {
+  1074→              contractId: line.contractId,
+  1075→              receivedDate: new Date(),
+  1076→              quantity: new D(line.quantity).abs().neg(),
+  1077→              weightKg: line.weightKg ? new D(line.weightKg).abs().neg() : null,
+  1078→              lotId: line.lotId,
+  1079→              inventoryDocumentId: reversalDoc.id,
+  1080→              notes: `ابطال ${original.documentNumber}`,
+  1081→            },
+  1082→          });
+  1083→          await refreshContractStatus(tx, line.contractId);
+  1084→        }
+  1085→      }
+  1086→
+  1087→      const postedReversal = await tx.inventoryDocument.update({
+  1088→        where: { id: reversalDoc.id },
+  1089→        data: { status: 'CONFIRMED', postingStatus: 'POSTED', postedById: userId, postedAt: new Date() },
+  1090→      });
+  1091→
+  1092→      await recordAudit(tx, {
+  1093→        userId,
+  1094→        action: 'REVERSE',
+  1095→        entityType: 'InventoryDocument',
+  1096→        entityId: original.id,
+  1097→        changes: {
+  1098→          reversalDocumentId: reversalDoc.id,
+  1099→          reversalNumber: reversalDoc.documentNumber,
+  1100→          reason: parsed.reason,
+  1101→        },
+  1102→        ipAddress: meta.ip,
+  1103→        userAgent: meta.ua,
+  1104→      });
+  1105→
+  1106→      return postedReversal;
+  1107→    },
+  1108→    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 30_000 },
+  1109→  );
+  1110→}
+  1111→
+  1112→// ---------------------------------------------------------------------------
+  1113→// reservations
+  1114→// ---------------------------------------------------------------------------
+  1115→
+  1116→export async function createReservation(input: unknown, userId: string) {
+  1117→  const parsed = createReservationSchema.parse(input);
+  1118→  return db.$transaction(async (tx) => {
+  1119→    const unitId =
+  1120→      parsed.unitId ??
+  1121→      (parsed.partId
+  1122→        ? (await tx.part.findUnique({ where: { id: parsed.partId } }))?.baseUnitId
+  1123→        : (await tx.material.findUnique({ where: { id: parsed.materialId! } }))?.baseUnitId);
+  1124→    if (!unitId) throw new ApiError(422, 'unitId could not be resolved', 'واحد شمارش مشخص نشده است', 'unit_required');
+  1125→
+  1126→    const reservation = await tx.inventoryReservation.create({
+  1127→      data: {
+  1128→        partId: parsed.partId ?? null,
+  1129→        materialId: parsed.materialId ?? null,
+  1130→        warehouseId: parsed.warehouseId ?? null,
+  1131→        quantity: new D(parsed.quantity),
+  1132→        unitId,
+  1133→        forManufacturingOrderId: parsed.forManufacturingOrderId ?? null,
+  1134→        forCustomerOrderLineId: parsed.forCustomerOrderLineId ?? null,
+  1135→        expiresAt: parsed.expiresAt ? new Date(parsed.expiresAt) : null,
+  1136→        notes: parsed.notes ?? null,
+  1137→      },
+  1138→    });
+  1139→    await recordAudit(tx, {
+  1140→      userId,
+  1141→      action: 'CREATE',
+  1142→      entityType: 'InventoryReservation',
+  1143→      entityId: reservation.id,
+  1144→      changes: { quantity: parsed.quantity },
+  1145→    });
+  1146→    return reservation;
+  1147→  });
+  1148→}
+  1149→
+  1150→export async function releaseReservation(id: string, userId: string) {
+  1151→  return db.$transaction(async (tx) => {
+  1152→    const res = await tx.inventoryReservation.findUnique({ where: { id } });
+  1153→    if (!res) throw new ApiError(404, 'Reservation not found', 'رزرو یافت نشد', 'reservation_not_found');
+  1154→    if (res.status !== 'ACTIVE') {
+  1155→      throw new ApiError(409, 'Only active reservations can be released', 'فقط رزرو فعال قابل آزادسازی است', 'reservation_not_active');
+  1156→    }
+  1157→    const updated = await tx.inventoryReservation.update({ where: { id }, data: { status: 'RELEASED' } });
+  1158→    await recordAudit(tx, { userId, action: 'RELEASE', entityType: 'InventoryReservation', entityId: id });
+  1159→    return updated;
+  1160→  });
+  1161→}
+  1162→
+  1163→export async function listReservations(status?: string) {
+  1164→  return db.inventoryReservation.findMany({
+  1165→    where: { status: status as never },
+  1166→    orderBy: { createdAt: 'desc' },
+  1167→    take: 200,
+  1168→    include: {
+  1169→      part: { select: { partNumber: true, nameFa: true } },
+  1170→      material: { select: { materialCode: true, nameFa: true } },
+  1171→      unit: { select: { code: true } },
+  1172→      warehouse: { select: { code: true, nameFa: true } },
+  1173→      forManufacturingOrder: { select: { moNumber: true } },
+  1174→    },
+  1175→  });
+  1176→}
+  1177→
+  1178→// ---------------------------------------------------------------------------
+  1179→// balances / ledger / inquiries
+  1180→// ---------------------------------------------------------------------------
+  1181→
+  1182→export interface BalanceRow {
+  1183→  partId: string | null;
+  1184→  materialId: string | null;
+  1185→  itemCode: string;
+  1186→  itemName: string;
+  1187→  unitCode: string;
+  1188→  warehouseId: string;
+  1189→  warehouseCode: string;
+  1190→  warehouseName: string;
+  1191→  locationId: string | null;
+  1192→  locationCode: string | null;
+  1193→  lotId: string | null;
+  1194→  lotNumber: string | null;
+  1195→  ownership: StockOwnership;
+  1196→  qualityStatus: QualityStatus;
+  1197→  quantity: string;
+  1198→  weightKg: string;
+  1199→  lastTransactionAt: string | null;
+  1200→}
+  1201→
+  1202→export interface ReservedSummaryRow {
+  1203→  partId: string | null;
+  1204→  materialId: string | null;
+  1205→  warehouseId: string | null;
+  1206→  unitCode: string;
+  1207→  quantity: string;
+  1208→}
+  1209→
+  1210→export interface BalanceFilters {
+  1211→  partId?: string;
+  1212→  materialId?: string;
+  1213→  warehouseId?: string;
+  1214→  locationId?: string;
+  1215→  lotId?: string;
+  1216→  ownership?: StockOwnership;
+  1217→  qualityStatus?: QualityStatus;
+  1218→}
+  1219→
+  1220→export interface LedgerFilters {
+  1221→  partId?: string;
+  1222→  materialId?: string;
+  1223→  warehouseId?: string;
+  1224→  lotId?: string;
+  1225→  documentId?: string;
+  1226→  type?: InventoryTxType;
+  1227→  from?: string;
+  1228→  to?: string;
+  1229→  take?: number;
+  1230→}
+  1231→
+  1232→/** Physical / owned / consignment / blocked / reserved / available stock inquiry. */
+  1233→export async function getBalances(filters: BalanceFilters) {
+  1234→  const where: Prisma.StockBalanceWhereInput = {
+  1235→    partId: filters.partId,
+  1236→    materialId: filters.materialId,
+  1237→    warehouseId: filters.warehouseId,
+  1238→    locationId: filters.locationId,
+  1239→    lotId: filters.lotId,
+  1240→    ownership: filters.ownership,
+  1241→    qualityStatus: filters.qualityStatus,
+  1242→  };
+  1243→
+  1244→  const rows = await db.stockBalance.findMany({
+  1245→    where,
+  1246→    include: {
+  1247→      part: { select: { partNumber: true, nameFa: true, baseUnit: { select: { code: true } } } },
+  1248→      material: { select: { materialCode: true, nameFa: true, baseUnit: { select: { code: true } } } },
+  1249→      warehouse: { select: { code: true, nameFa: true } },
+  1250→      location: { select: { code: true, nameFa: true } },
+  1251→      lot: { select: { lotNumber: true } },
+  1252→      unit: { select: { code: true, nameFa: true } },
+  1253→    },
+  1254→    orderBy: [{ warehouseId: 'asc' }, { updatedAt: 'desc' }],
+  1255→    take: 1000,
+  1256→  });
+  1257→
+  1258→  const result: BalanceRow[] = rows.map((b) => ({
+  1259→    partId: b.partId,
+  1260→    materialId: b.materialId,
+  1261→    itemCode: b.part?.partNumber ?? b.material?.materialCode ?? '',
+  1262→    itemName: b.part?.nameFa ?? b.material?.nameFa ?? '',
+  1263→    unitCode: b.unit.code,
+  1264→    warehouseId: b.warehouseId,
+  1265→    warehouseCode: b.warehouse.code,
+  1266→    warehouseName: b.warehouse.nameFa,
+  1267→    locationId: b.locationId,
+  1268→    locationCode: b.location?.code ?? null,
+  1269→    lotId: b.lotId,
+  1270→    lotNumber: b.lot?.lotNumber ?? null,
+  1271→    ownership: b.ownership,
+  1272→    qualityStatus: b.qualityStatus,
+  1273→    quantity: new D(b.quantity).toFixed(4),
+  1274→    weightKg: new D(b.weightKg).toFixed(4),
+  1275→    lastTransactionAt: b.lastTransactionAt?.toISOString() ?? null,
+  1276→  }));
+  1277→
+  1278→  return result;
+  1279→}
+  1280→
+  1281→export async function getReservedSummary(): Promise<ReservedSummaryRow[]> {
+  1282→  const allReservations = await db.inventoryReservation.groupBy({
+  1283→    by: ['partId', 'materialId', 'warehouseId', 'unitId'],
+  1284→    where: { status: 'ACTIVE' },
+  1285→    _sum: { quantity: true },
+  1286→  });
+  1287→  const out: ReservedSummaryRow[] = [];
+  1288→  for (const r of allReservations) {
+  1289→    const u = await db.unitOfMeasure.findUnique({ where: { id: r.unitId }, select: { code: true } });
+  1290→    out.push({
+  1291→      partId: r.partId,
+  1292→      materialId: r.materialId,
+  1293→      warehouseId: r.warehouseId,
+  1294→      unitCode: u?.code ?? '',
+  1295→      quantity: new D(r._sum?.quantity ?? 0).toFixed(4),
+  1296→    });
+  1297→  }
+  1298→  return out;
+  1299→}
+  1300→
+  1301→export async function getLedger(filters: LedgerFilters) {
+  1302→  const where: Prisma.InventoryTransactionWhereInput = {
+  1303→    partId: filters.partId,
+  1304→    materialId: filters.materialId,
+  1305→    warehouseId: filters.warehouseId,
+  1306→    lotId: filters.lotId,
+  1307→    documentId: filters.documentId,
+  1308→    type: filters.type,
+  1309→  };
+  1310→  if (filters.from || filters.to) {
+  1311→    where.occurredAt = {};
+  1312→    if (filters.from) where.occurredAt.gte = new Date(`${filters.from}T00:00:00.000Z`);
+  1313→    if (filters.to) where.occurredAt.lte = new Date(`${filters.to}T23:59:59.999Z`);
+  1314→  }
+  1315→  const rows = await db.inventoryTransaction.findMany({
+  1316→    where,
+  1317→    orderBy: { occurredAt: 'desc' },
+  1318→    take: Number(filters.take ?? 200),
+  1319→    include: {
+  1320→      part: { select: { partNumber: true, nameFa: true } },
+  1321→      material: { select: { materialCode: true, nameFa: true } },
+  1322→      warehouse: { select: { code: true, nameFa: true } },
+  1323→      location: { select: { code: true, nameFa: true } },
+  1324→      lot: { select: { lotNumber: true } },
+  1325→      unit: { select: { code: true } },
+  1326→      document: { select: { documentNumber: true, documentType: true, reasonCode: true } },
+  1327→      createdBy: { select: { fullName: true } },
+  1328→      reversalOf: { select: { transactionNumber: true } },
+  1329→    },
+  1330→  });
+  1331→  return rows;
+  1332→}
+  1333→
+  1334→// ---------------------------------------------------------------------------
+  1335→// SAPCO account report (kg) + contracts
+  1336→// ---------------------------------------------------------------------------
+  1337→
+  1338→export async function getSapcoAccount(filters: { materialId?: string; from?: string; to?: string }) {
+  1339→  const materials = await db.material.findMany({
+  1340→    where: { ...(filters.materialId ? { id: filters.materialId } : {}), supplierName: 'SAPCO' },
+  1341→    include: { baseUnit: true },
+  1342→  });
+  1343→
+  1344→  const fromDate = filters.from ? new Date(`${filters.from}T00:00:00.000Z`) : null;
+  1345→  const toDate = filters.to ? new Date(`${filters.to}T23:59:59.999Z`) : new Date();
+  1346→
+  1347→  const inTypes: InventoryTxType[] = ['RECEIPT', 'TRANSFER_IN', 'ADJUSTMENT_IN'];
+  1348→  const outTypes: InventoryTxType[] = ['ISSUE', 'TRANSFER_OUT', 'ADJUSTMENT_OUT'];
+  1349→
+  1350→  const rows = [];
+  1351→  for (const material of materials) {
+  1352→    const baseWhere: Prisma.InventoryTransactionWhereInput = { materialId: material.id };
+  1353→    const periodWhere: Prisma.InventoryTransactionWhereInput = {
+  1354→      ...baseWhere,
+  1355→      occurredAt: { gte: fromDate ?? undefined, lte: toDate },
+  1356→    };
+  1357→    const openingWhere: Prisma.InventoryTransactionWhereInput = fromDate
+  1358→      ? { ...baseWhere, occurredAt: { lt: fromDate } }
+  1359→      : { id: '00000000-0000-0000-0000-000000000000' }; // no period start → opening is zero
+  1360→
+  1361→    const [receipts, consumption, byOwnership, openingGroups] = await Promise.all([
+  1362→      db.inventoryTransaction.aggregate({
+  1363→        where: { ...periodWhere, type: { in: inTypes } },
+  1364→        _sum: { weightKg: true },
+  1365→      }),
+  1366→      db.inventoryTransaction.aggregate({
+  1367→        where: { ...periodWhere, type: { in: outTypes } },
+  1368→        _sum: { weightKg: true },
+  1369→      }),
+  1370→      db.inventoryTransaction.groupBy({
+  1371→        by: ['ownership'],
+  1372→        where: { ...periodWhere, type: { in: inTypes } },
+  1373→        _sum: { weightKg: true },
+  1374→      }),
+  1375→      db.inventoryTransaction.groupBy({ by: ['type'], where: openingWhere, _sum: { weightKg: true } }),
+  1376→    ]);
+  1377→
+  1378→    let openingKg = new D(0);
+  1379→    for (const g of openingGroups) {
+  1380→      if (g._sum?.weightKg) openingKg = openingKg.plus(new D(g._sum.weightKg).mul(TX_SIGN[g.type]));
+  1381→    }
+  1382→
+  1383→    const receivedKg = receipts._sum.weightKg ? new D(receipts._sum.weightKg) : new D(0);
+  1384→    const consumedKg = consumption._sum.weightKg ? new D(consumption._sum.weightKg) : new D(0);
+  1385→    const closingKg = openingKg.plus(receivedKg).minus(consumedKg);
+  1386→
+  1387→    const consignmentReceived = byOwnership.find((o) => o.ownership === 'SUPPLIER_CONSIGNMENT')?._sum.weightKg;
+  1388→    const ownedReceived = byOwnership.find((o) => o.ownership === 'OWNED')?._sum.weightKg;
+  1389→
+  1390→    const contractTxs = await db.materialContractTransaction.findMany({
+  1391→      where: {
+  1392→        contract: { materialId: material.id },
+  1393→        receivedDate: { gte: fromDate ?? undefined, lte: toDate },
+  1394→      },
+  1395→      include: { contract: { select: { contractNumber: true, status: true, totalWeightKg: true } } },
+  1396→      orderBy: { receivedDate: 'asc' },
+  1397→      take: 200,
+  1398→    });
+  1399→
+  1400→    rows.push({
+  1401→      materialId: material.id,
+  1402→      materialCode: material.materialCode,
+  1403→      materialName: material.nameFa,
+  1404→      grade: material.grade,
+  1405→      thicknessMm: material.thicknessMm,
+  1406→      openingKg: openingKg.toFixed(3),
+  1407→      receivedKg: receivedKg.toFixed(3),
+  1408→      ownedReceivedKg: ownedReceived ? new D(ownedReceived).toFixed(3) : '0.000',
+  1409→      consignmentReceivedKg: consignmentReceived ? new D(consignmentReceived).toFixed(3) : '0.000',
+  1410→      consumedKg: consumedKg.toFixed(3),
+  1411→      closingKg: closingKg.toFixed(3),
+  1412→      contractMovements: contractTxs.map((t) => ({
+  1413→        id: t.id,
+  1414→        contractNumber: t.contract.contractNumber,
+  1415→        contractStatus: t.contract.status,
+  1416→        receivedDate: t.receivedDate,
+  1417→        quantity: new D(t.quantity).toFixed(2),
+  1418→        weightKg: t.weightKg ? new D(t.weightKg).toFixed(3) : null,
+  1419→        isReversal: new D(t.quantity).isNegative(),
+  1420→        notes: t.notes,
+  1421→      })),
+  1422→    });
+  1423→  }
+  1424→  return rows;
+  1425→}
+  1426→
+  1427→export async function listContracts() {
+  1428→  const contracts = await db.materialContract.findMany({
+  1429→    orderBy: { orderDate: 'desc' },
+  1430→    include: {
+  1431→      material: { select: { materialCode: true, nameFa: true, baseUnit: { select: { code: true } } } },
+  1432→      transactions: { select: { quantity: true, weightKg: true } },
+  1433→    },
+  1434→    take: 200,
+  1435→  });
+  1436→  return contracts.map((c) => {
+  1437→    const receivedQty = c.transactions.reduce((acc, t) => acc.plus(new D(t.quantity)), new D(0));
+  1438→    const receivedKg = c.transactions.reduce((acc, t) => acc.plus(t.weightKg ? new D(t.weightKg) : new D(0)), new D(0));
+  1439→    return {
+  1440→      id: c.id,
+  1441→      contractNumber: c.contractNumber,
+  1442→      supplierName: c.supplierName,
+  1443→      material: c.material,
+  1444→      orderDate: c.orderDate,
+  1445→      expectedDeliveryDate: c.expectedDeliveryDate,
+  1446→      totalQuantity: new D(c.totalQuantity).toFixed(2),
+  1447→      totalWeightKg: c.totalWeightKg ? new D(c.totalWeightKg).toFixed(3) : null,
+  1448→      receivedQuantity: receivedQty.toFixed(2),
+  1449→      receivedWeightKg: receivedKg.toFixed(3),
+  1450→      status: c.status,
+  1451→      description: c.description,
+  1452→    };
+  1453→  });
+  1454→}
+  1455→
+  1456→export async function createContract(input: unknown, userId: string) {
+  1457→  const parsed = createContractSchema.parse(input);
+  1458→  const contract = await db.materialContract.create({
+  1459→    data: {
+  1460→      contractNumber: parsed.contractNumber,
+  1461→      supplierName: parsed.supplierName,
+  1462→      materialId: parsed.materialId,
+  1463→      orderDate: new Date(`${parsed.orderDate}T00:00:00Z`),
+  1464→      expectedDeliveryDate: parsed.expectedDeliveryDate ? new Date(`${parsed.expectedDeliveryDate}T00:00:00Z`) : null,
+  1465→      totalQuantity: new D(parsed.totalQuantity),
+  1466→      totalWeightKg: parsed.totalWeightKg != null ? new D(parsed.totalWeightKg) : null,
+  1467→      description: parsed.description ?? null,
+  1468→    },
+  1469→  });
+  1470→  await recordAudit(db, {
+  1471→    userId,
+  1472→    action: 'CREATE',
+  1473→    entityType: 'MaterialContract',
+  1474→    entityId: contract.id,
+  1475→    changes: { contractNumber: contract.contractNumber },
+  1476→  });
+  1477→  return contract;
+  1478→}
+  1479→
+  1480→export async function listLots(materialId?: string) {
+  1481→  return db.materialLot.findMany({
+  1482→    where: materialId ? { materialId } : undefined,
+  1483→    orderBy: { receiptDate: 'desc' },
+  1484→    take: 200,
+  1485→    include: { material: { select: { materialCode: true, nameFa: true } } },
+  1486→  });
+  1487→}
+  1488→
+  1489→// ---------------------------------------------------------------------------
+  1490→// quality release — reclassification between quality dimensions (net zero)
+  1491→// ---------------------------------------------------------------------------
+  1492→
+  1493→export async function releaseQuality(input: unknown, userId: string, meta: { ip?: string; ua?: string }) {
+  1494→  const parsed = qualityReleaseSchema.parse(input);
+  1495→  const qty = new D(parsed.quantity);
+  1496→  if (!qty.isPositive()) {
+  1497→    throw new ApiError(422, 'Quantity must be positive', 'مقدار باید مثبت باشد', 'bad_quantity');
+  1498→  }
+  1499→
+  1500→  return db.$transaction(
+  1501→    async (tx) => {
+  1502→      let partId: string | null = null;
+  1503→      let materialId: string | null = null;
+  1504→      let unitId: string;
+  1505→      let weightKg: Dec | null = null;
+  1506→      let ownership: StockOwnership = 'OWNED';
+  1507→
+  1508→      if (parsed.lotId) {
+  1509→        const lot = await tx.materialLot.findUnique({ where: { id: parsed.lotId } });
+  1510→        if (!lot) throw new ApiError(404, 'Lot not found', 'لوت یافت نشد', 'lot_not_found');
+  1511→        materialId = lot.materialId;
+  1512→        ownership = lot.ownership;
+  1513→        const material = await tx.material.findUnique({ where: { id: materialId }, include: { baseUnit: true } });
+  1514→        // prefer the unit of the existing stock rows for this lot/quality dimension
+  1515→        const existingUnits = await tx.stockBalance.findMany({
+  1516→          where: { lotId: lot.id, qualityStatus: parsed.fromQualityStatus, quantity: { gt: 0 } },
+  1517→          select: { unitId: true },
+  1518→          distinct: ['unitId'],
+  1519→        });
+  1520→        unitId = parsed.unitId ?? existingUnits[0]?.unitId ?? material!.baseUnitId;
+  1521→        const unit = await tx.unitOfMeasure.findUnique({ where: { id: unitId } });
+  1522→        weightKg =
+  1523→          unit!.kind === 'WEIGHT'
+  1524→            ? qty
+  1525→            : material!.unitWeightKg
+  1526→              ? qty.mul(new D(material!.unitWeightKg))
+  1527→              : null;
+  1528→        void unit;
+  1529→      } else if (parsed.partId) {
+  1530→        const part = await tx.part.findUnique({ where: { id: parsed.partId } });
+  1531→        if (!part) throw new ApiError(404, 'Part not found', 'قطعه یافت نشد', 'part_not_found');
+  1532→        partId = part.id;
+  1533→        unitId = part.baseUnitId;
+  1534→        weightKg = part.standardWeightKg ? qty.mul(new D(part.standardWeightKg)) : null;
+  1535→      } else if (parsed.materialId) {
+  1536→        const material = await tx.material.findUnique({ where: { id: parsed.materialId }, include: { baseUnit: true } });
+  1537→        if (!material) throw new ApiError(404, 'Material not found', 'ماده اولیه یافت نشد', 'material_not_found');
+  1538→        materialId = material.id;
+  1539→        unitId = material.baseUnitId;
+  1540→        weightKg =
+  1541→          material.baseUnit.kind === 'WEIGHT' ? qty : material.unitWeightKg ? qty.mul(new D(material.unitWeightKg)) : null;
+  1542→      } else {
+  1543→        throw new ApiError(422, 'lotId, partId or materialId is required', 'یکی از شناسه‌های قلم الزامی است', 'item_required');
+  1544→      }
+  1545→
+  1546→      const documentNumber = await generateDocumentNumber(tx, 'INV');
+  1547→      const doc = await tx.inventoryDocument.create({
+  1548→        data: {
+  1549→          documentNumber,
+  1550→          documentType: 'ADJUSTMENT',
+  1551→          status: 'DRAFT',
+  1552→          postingStatus: 'UNPOSTED',
+  1553→          documentDate: new Date(),
+  1554→          warehouseId: parsed.warehouseId,
+  1555→          description: `آزادسازی کیفیت از ${parsed.fromQualityStatus} به تأییدشده`,
+  1556→          reasonCode: 'QUALITY_RELEASE',
+  1557→          reasonText: parsed.notes ?? null,
+  1558→          createdById: userId,
+  1559→        },
+  1560→      });
+  1561→
+  1562→      // resolve the location/unit from the existing quarantined stock rows when
+  1563→      // the caller did not specify them (release wherever the stock actually sits)
+  1564→      const existingRows = await tx.stockBalance.findMany({
+  1565→        where: {
+  1566→          warehouseId: parsed.warehouseId,
+  1567→          qualityStatus: parsed.fromQualityStatus,
+  1568→          quantity: { gt: 0 },
+  1569→          ...(parsed.lotId ? { lotId: parsed.lotId } : {}),
+  1570→          ...(partId ? { partId } : {}),
+  1571→          ...(materialId ? { materialId } : {}),
+  1572→        },
+  1573→        select: { unitId: true, locationId: true },
+  1574→        take: 1,
+  1575→      });
+  1576→      if (!parsed.unitId && parsed.lotId && existingRows[0]) {
+  1577→        unitId = existingRows[0].unitId;
+  1578→        const unitRow = await tx.unitOfMeasure.findUnique({ where: { id: unitId } });
+  1579→        weightKg =
+  1580→          unitRow!.kind === 'WEIGHT'
+  1581→            ? qty
+  1582→            : materialId
+  1583→              ? await tx.material
+  1584→                  .findUnique({ where: { id: materialId }, select: { unitWeightKg: true } })
+  1585→                  .then((m) => (m?.unitWeightKg ? qty.mul(new D(m.unitWeightKg)) : null))
+  1586→              : null;
+  1587→      }
+  1588→      const locationId = parsed.locationId ?? existingRows[0]?.locationId ?? null;
+  1589→
+  1590→      const occurredAt = new Date();
+  1591→      const dims = {
+  1592→        partId,
+  1593→        materialId,
+  1594→        warehouseId: parsed.warehouseId,
+  1595→        locationId,
+  1596→        lotId: parsed.lotId ?? null,
+  1597→        ownership,
+  1598→      };
+  1599→
+  1600→      // balance movement BEFORE its own ledger row (consistent with postDocument)
+  1601→      await applyStockMovement(tx, { ...dims, unitId, qualityStatus: parsed.fromQualityStatus }, qty.neg(), weightKg ? weightKg.neg() : new D(0), occurredAt);
+  1602→      await createLedgerTx(tx, {
+  1603→        documentId: doc.id, documentLineId: null, type: 'ADJUSTMENT_OUT',
+  1604→        ...dims, qualityStatus: parsed.fromQualityStatus,
+  1605→        quantity: qty, unitId, weightKg, createdById: userId,
+  1606→      });
+  1607→
+  1608→      await applyStockMovement(tx, { ...dims, unitId, qualityStatus: 'APPROVED' }, qty, weightKg ?? new D(0), occurredAt);
+  1609→      await createLedgerTx(tx, {
+  1610→        documentId: doc.id, documentLineId: null, type: 'ADJUSTMENT_IN',
+  1611→        ...dims, qualityStatus: 'APPROVED',
+  1612→        quantity: qty, unitId, weightKg, createdById: userId,
+  1613→      });
+  1614→
+  1615→      const postedDoc = await tx.inventoryDocument.update({
+  1616→        where: { id: doc.id },
+  1617→        data: { status: 'CONFIRMED', postingStatus: 'POSTED', postedById: userId, postedAt: new Date() },
+  1618→      });
+  1619→
+  1620→      await recordAudit(tx, {
+  1621→        userId,
+  1622→        action: 'POST',
+  1623→        entityType: 'InventoryDocument',
+  1624→        entityId: doc.id,
+  1625→        changes: { action: 'QUALITY_RELEASE', quantity: parsed.quantity, fromQualityStatus: parsed.fromQualityStatus },
+  1626→        ipAddress: meta.ip,
+  1627→        userAgent: meta.ua,
+  1628→      });
+  1629→
+  1630→      return postedDoc;
+  1631→    },
+  1632→    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20_000 },
+  1633→  );
+  1634→}
+  1635→
+  1636→// ---------------------------------------------------------------------------
+  1637→// dashboard
+  1638→// ---------------------------------------------------------------------------
+  1639→
+  1640→export async function getInventoryDashboard() {
+  1641→  const [docCounts, txToday, itemsInStock, consignmentAgg, ownedAgg, reservedCount, recentTxs, blockedRows] =
+  1642→    await Promise.all([
+  1643→      db.inventoryDocument.groupBy({ by: ['documentType', 'postingStatus'], _count: true }),
+  1644→      db.inventoryTransaction.count({ where: { occurredAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } } }),
+  1645→      db.stockBalance.count({ where: { quantity: { gt: 0 } } }),
+  1646→      db.stockBalance.aggregate({
+  1647→        where: { ownership: 'SUPPLIER_CONSIGNMENT' },
+  1648→        _sum: { weightKg: true },
+  1649→      }),
+  1650→      db.stockBalance.aggregate({ where: { ownership: 'OWNED' }, _sum: { weightKg: true } }),
+  1651→      db.inventoryReservation.count({ where: { status: 'ACTIVE' } }),
+  1652→      db.inventoryTransaction.findMany({
+  1653→        orderBy: { occurredAt: 'desc' },
+  1654→        take: 10,
+  1655→        include: {
+  1656→          part: { select: { partNumber: true, nameFa: true } },
+  1657→          material: { select: { materialCode: true, nameFa: true } },
+  1658→          warehouse: { select: { code: true, nameFa: true } },
+  1659→          document: { select: { documentNumber: true } },
+  1660→        },
+  1661→      }),
+  1662→      db.stockBalance.count({ where: { qualityStatus: { not: 'APPROVED' }, quantity: { gt: 0 } } }),
+  1663→    ]);
+  1664→
+  1665→  const draftDocs = docCounts.filter((d) => d.postingStatus === 'UNPOSTED').reduce((a, d) => a + d._count, 0);
+  1666→  const postedDocs = docCounts.filter((d) => d.postingStatus === 'POSTED').reduce((a, d) => a + d._count, 0);
+  1667→
+  1668→  const byType: Record<string, number> = {};
+  1669→  for (const d of docCounts) {
+  1670→    byType[d.documentType] = (byType[d.documentType] ?? 0) + d._count;
+  1671→  }
+  1672→
+  1673→  return {
+  1674→    documents: { draft: draftDocs, posted: postedDocs, byType },
+  1675→    transactionsToday: txToday,
+  1676→    itemsInStock,
+  1677→    stockKg: {
+  1678→      owned: ownedAgg._sum.weightKg ? new D(ownedAgg._sum.weightKg).toFixed(2) : '0.00',
+  1679→      supplierConsignment: consignmentAgg._sum.weightKg ? new D(consignmentAgg._sum.weightKg).toFixed(2) : '0.00',
+  1680→    },
+  1681→    qualityBlockedRows: blockedRows,
+  1682→    activeReservations: reservedCount,
+  1683→    recentTransactions: recentTxs,
+  1684→    generatedAt: new Date().toISOString(),
+  1685→  };
+  1686→}
+  1687→

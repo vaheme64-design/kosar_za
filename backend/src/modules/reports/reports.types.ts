@@ -144,6 +144,18 @@ export const REPORT_CATALOG: ReportDef[] = [
     descriptionFa: 'مقایسه موجودی رسمی هر بُعد با جمع تراکنش‌های دفتر کل و آشکارسازی اختلاف',
     filters: ['partId', 'materialId', 'warehouseId'],
   },
+  {
+    key: 'coil-inventory',
+    titleFa: 'موجودی رول‌ها و کویل‌های ماده اولیه',
+    descriptionFa: 'وضعیت هر رول/لوت: سالم، ناقص (بازشده)، مصرف‌شده یا مسدود — با وزن دریافتی، باقی‌مانده و مصرف‌شده کیلوگرمی و قرارداد مرتبط',
+    filters: ['materialId', 'warehouseId', 'lotNumber', 'q'],
+  },
+  {
+    key: 'lot-consumption',
+    titleFa: 'ردیابی مصرف رول/لوت',
+    descriptionFa: 'حواله‌های مصرف هر لوت با سند، مقصد و کاربرد (توضیح/دستور کار)، ابطال‌ها و جمع مصرف در برابر دریافتی',
+    filters: ['from', 'to', 'materialId', 'lotNumber'],
+  },
 ];
 
 export const REPORT_KEYS = REPORT_CATALOG.map((r) => r.key);

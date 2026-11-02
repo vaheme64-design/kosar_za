@@ -59,6 +59,7 @@ export function InventoryDashboardPage() {
           { to: '/inventory/transfers/new', label: 'انتقال', permission: 'inventory.manage' },
           { to: '/inventory/adjustments/new', label: 'اصلاحیه', permission: 'inventory.manage' },
           { to: '/inventory/inquiry', label: 'استعلام موجودی' },
+          { to: '/inventory/lots', label: 'رول‌ها و لوت‌ها' },
           { to: '/inventory/movements', label: 'دفتر کل حرکت' },
           { to: '/inventory/documents', label: 'سندها' },
           { to: '/inventory/reservations', label: 'رزروها' },

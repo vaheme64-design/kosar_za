@@ -120,6 +120,7 @@ export function DocumentsPage() {
         items={[
           { to: '/inventory', label: 'داشبورد' },
           { to: '/inventory/documents', label: 'سندها' },
+          { to: '/inventory/lots', label: 'رول‌ها و لوت‌ها' },
           { to: '/inventory/movements', label: 'دفتر کل حرکت' },
         ]}
       />

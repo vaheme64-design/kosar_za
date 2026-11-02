@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from './api';
 
 /** Compact master-data lookups for the operational forms (read-only endpoint). */
@@ -23,29 +23,30 @@ const EMPTY: Lookups = {
   lots: [], contracts: [], shifts: [], machines: [], customers: [], routes: [], operations: [], dies: [],
 };
 
-/** Fetch (and cache per mount) the master-data lookups. */
+/** Fetch (and cache per mount) the master-data lookups. `reload` re-fetches (e.g. after creating a contract). */
 export function useLookups() {
   const [lookups, setLookups] = useState<Lookups>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const fetchAll = useCallback(async () => {
     setLoading(true);
-    api<Lookups>('/master-data/lookups')
-      .then((res) => {
-        if (!cancelled) setLookups(res);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'خطا در دریافت اطلاعات پایه');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const res = await api<Lookups>('/master-data/lookups');
+      setLookups(res);
+      setError(null);
+      return res;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'خطا در دریافت اطلاعات پایه');
+      return null;
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  return { lookups, loading, error };
+  useEffect(() => {
+    void fetchAll();
+  }, [fetchAll]);
+
+  return { lookups, loading, error, reload: fetchAll };
 }

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { FileSpreadsheet, Search, ExternalLink, RefreshCw } from 'lucide-react';
+import { FileSpreadsheet, Search, ExternalLink, RefreshCw, Sparkles } from 'lucide-react';
 import { api, getAuthToken, ApiClientError } from '../../lib/api';
+import { aiReportQuery, getAiStatus, type AiReportQueryResponse, type AiStatus } from '../../lib/ai';
 import { useLookups } from '../../lib/lookups';
 import { faNumber } from '../../lib/jalali';
 import {
-  Page, Card, Field, Select, TextInput, Button, Table, EmptyState, Loading, ErrorBanner, Badge, Qty, fa, Modal,
+  Page, Card, Field, Select, TextInput, Button, Table, EmptyState, Loading, ErrorBanner, Badge, Qty, Modal,
 } from '../../components/ui';
 
 // ---------------------------------------------------------------------------
@@ -79,13 +80,45 @@ const REPORT_FILTERS: Record<string, string[]> = {
   'inventory-reconciliation': ['partId', 'materialId', 'warehouseId'],
 };
 
-const CELL_VALUE_KIND: Record<string, ValueKind> = {};
-
 function cellDisplay(value: unknown): React.ReactNode {
   if (value === null || value === undefined) return '—';
   if (typeof value === 'boolean') return value ? 'بله' : 'خیر';
   if (typeof value === 'object') return '—';
   return String(value);
+}
+
+/** Shared cell renderer — used by the direct report table AND the AI-mapped table. */
+function renderReportCell(
+  c: { key: string; kind: string; unit?: string | null },
+  v: unknown,
+  onDrill: (d: DrillRef) => void,
+): React.ReactNode {
+  if (c.key === '_drill') {
+    const d = v as DrillRef | undefined;
+    if (!d || typeof d !== 'object' || !d.kind) return <td key={c.key}>—</td>;
+    return (
+      <td key={c.key}>
+        <button className="btn btn--ghost btn--sm" onClick={() => onDrill(d)} type="button">
+          جزئیات
+        </button>
+      </td>
+    );
+  }
+  if (typeof v === 'boolean') {
+    return (
+      <td key={c.key}>
+        <Badge tone={v ? 'ok' : 'warn'}>{v ? 'بله' : 'خیر'}</Badge>
+      </td>
+    );
+  }
+  if (c.kind === 'ACTUAL' || c.kind === 'ESTIMATED' || c.kind === 'STANDARD' || c.kind === 'PLANNED') {
+    const num = Number(v);
+    if (v !== null && v !== undefined && Number.isFinite(num)) {
+      return <td key={c.key}><Qty value={num} unit={c.unit ?? null} /></td>;
+    }
+    return <td key={c.key}>{cellDisplay(v)}</td>;
+  }
+  return <td key={c.key}>{cellDisplay(v)}</td>;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +193,15 @@ export function ReportViewerPage() {
   const [drill, setDrill] = useState<DrillRef | null>(null);
   const [csvBusy, setCsvBusy] = useState(false);
 
+  // «پرسش با هوش مصنوعی» box
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [aiStatusError, setAiStatusError] = useState<string | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiQuestion, setAiQuestion] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiResult, setAiResult] = useState<AiReportQueryResponse | null>(null);
+
   const filterKeys = useMemo(() => REPORT_FILTERS[key] ?? [], [key]);
 
   const load = useCallback(async () => {
@@ -184,6 +226,31 @@ export function ReportViewerPage() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
+
+  // real AI probe once per mount — honest disabled state when unreachable
+  useEffect(() => {
+    getAiStatus()
+      .then(setAiStatus)
+      .catch((err) => setAiStatusError(err instanceof Error ? err.message : 'خطا در بررسی وضعیت دستیار'));
+  }, []);
+
+  const aiAvailable = Boolean(aiStatus && aiStatus.enabled && aiStatus.reachable);
+
+  const askAi = async () => {
+    const q = aiQuestion.trim();
+    if (q.length < 2 || aiBusy) return;
+    setAiBusy(true);
+    setAiError(null);
+    setAiResult(null);
+    try {
+      setAiResult(await aiReportQuery(q));
+    } catch (err) {
+      const faMsg = (err as { messageFa?: string }).messageFa;
+      setAiError(faMsg ?? (err instanceof ApiClientError ? err.message : 'پرسش هوش مصنوعی ناموفق بود'));
+    } finally {
+      setAiBusy(false);
+    }
+  };
 
   const set = (k: keyof typeof filters) => (e: { target: { value: string } }) =>
     setFilters((f) => ({ ...f, [k]: e.target.value }));
@@ -235,6 +302,86 @@ export function ReportViewerPage() {
         </>
       }
     >
+      {/* «پرسش با هوش مصنوعی» — honest disabled state when the assistant is down */}
+      {(aiStatus || aiStatusError) && (
+        <Card
+          title="پرسش با هوش مصنوعی"
+          note={aiAvailable ? `مدل: ${aiStatus?.model}` : undefined}
+          actions={
+            aiAvailable && (
+              <Button variant="ghost" onClick={() => setAiOpen((o) => !o)} type="button">
+                <Sparkles size={15} /> {aiOpen ? 'بستن' : 'پرسش جدید'}
+              </Button>
+            )
+          }
+        >
+          {!aiAvailable ? (
+            <div className="alert alert--info">
+              دستیار هوشمند در دسترس نیست{aiStatus?.errorFa ? ` — ${aiStatus.errorFa}` : aiStatusError ? ` — ${aiStatusError}` : ''}{' '}
+              برای راه‌اندازی محلی (رایگان با Ollama) به <Link to="/settings/ai">تنظیمات هوش مصنوعی</Link> بروید.
+            </div>
+          ) : (
+            aiOpen && (
+              <div className="ai-report">
+                <textarea
+                  className="input ai-report__question"
+                  rows={2}
+                  value={aiQuestion}
+                  onChange={(e) => setAiQuestion(e.target.value)}
+                  placeholder="مثلاً: مصرف ورق ماه گذشته در مقابل سرانه چقدر بود؟"
+                  aria-label="پرسش گزارش به زبان طبیعی"
+                />
+                <div className="ai-suggest__bar">
+                  <Button onClick={() => void askAi()} disabled={aiBusy || aiQuestion.trim().length < 2} type="button">
+                    <Sparkles size={15} /> {aiBusy ? 'در حال اجرا…' : 'پرسش از گزارش‌ها'}
+                  </Button>
+                  <span className="ai-suggest__hint">
+                    پرسش به یکی از گزارش‌های رسمی نگاشت می‌شود؛ اعداد همیشه از همان گزارش خوانده می‌شوند.
+                  </span>
+                </div>
+
+                {aiError && <ErrorBanner message={aiError} />}
+
+                {aiResult && (
+                  <div className="ai-report__result">
+                    <div className="ai-answer-label">پاسخ دستیار هوشمند — صرفاً پیشنهاد</div>
+                    <div className="ai-note">{aiResult.explanationFa}</div>
+                    {aiResult.aiSummary && (
+                      <div className="ai-report__summary">
+                        <b>خلاصه دستیار</b>
+                        <p>{aiResult.aiSummary}</p>
+                      </div>
+                    )}
+                    {aiResult.table.rows.length === 0 ? (
+                      <EmptyState icon={<FileSpreadsheet size={24} />} title="داده‌ای یافت نشد" hint="فیلترهای نگاشت‌شده نتیجه‌ای نداشتند" />
+                    ) : (
+                      <Table head={aiResult.table.columns.map((c) => c.labelFa + (c.unit ? ` (${c.unit})` : ''))} dense>
+                        {aiResult.table.rows.map((row, i) => (
+                          <tr key={i}>
+                            {aiResult.table.columns.map((c) => renderReportCell(c, row[c.key], () => undefined))}
+                          </tr>
+                        ))}
+                      </Table>
+                    )}
+                    <p className="kpi-note">
+                      این جدول از گزارش نگاشت‌شده «{aiResult.table.titleFa}» خوانده شد · {aiResult.table.meta.generatedAtFa} ·{' '}
+                      <Link className="link-btn" to={`/reports/${aiResult.reportKey}`}>نمایش کامل گزارش</Link>
+                    </p>
+                    {aiResult.table.meta.notesFa.length > 0 && (
+                      <ul className="report-notes">
+                        {aiResult.table.meta.notesFa.map((n, i) => (
+                          <li key={i}>{n}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          )}
+        </Card>
+      )}
+
       {filterKeys.length > 0 && (
         <Card title="فیلترها">
           <div className="form-grid form-grid--wide">
@@ -342,37 +489,7 @@ export function ReportViewerPage() {
               <Table head={report.columns.map((c) => c.labelFa + (c.unit ? ` (${c.unit})` : ''))} dense>
                 {report.rows.map((row, i) => (
                   <tr key={i}>
-                    {report.columns.map((c) => {
-                      const v = row[c.key];
-                      if (c.key === '_drill') {
-                        const d = v as DrillRef | undefined;
-                        if (!d || typeof d !== 'object' || !d.kind) return <td key={c.key}>—</td>;
-                        return (
-                          <td key={c.key}>
-                            <button className="btn btn--ghost btn--sm" onClick={() => setDrill(d)} type="button">
-                              جزئیات
-                            </button>
-                          </td>
-                        );
-                      }
-                      if (typeof v === 'boolean') {
-                        return (
-                          <td key={c.key}>
-                            <Badge tone={v ? 'ok' : 'warn'}>{v ? 'بله' : 'خیر'}</Badge>
-                          </td>
-                        );
-                      }
-                      if (c.kind === 'ACTUAL' || c.kind === 'ESTIMATED' || c.kind === 'STANDARD' || c.kind === 'PLANNED') {
-                        const num = Number(v);
-                        if (v !== null && v !== undefined && Number.isFinite(num)) {
-                          return <td key={c.key}><Qty value={num} unit={c.unit ?? null} /></td>;
-                        }
-                        return <td key={c.key}>{cellDisplay(v)}</td>;
-                      }
-                      void CELL_VALUE_KIND;
-                      void fa;
-                      return <td key={c.key}>{cellDisplay(v)}</td>;
-                    })}
+                    {report.columns.map((c) => renderReportCell(c, row[c.key], (d) => setDrill(d)))}
                   </tr>
                 ))}
               </Table>

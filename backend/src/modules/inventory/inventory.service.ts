@@ -12,6 +12,7 @@ import {
   reverseDocumentSchema,
   type CreateDocumentInput,
 } from './inventory.schemas';
+import { deriveLotStatus, LOT_STATUS_FA, loadLotAggregates } from '../reports/reports.service';
 
 const D = Prisma.Decimal;
 type Tx = Prisma.TransactionClient;
@@ -1682,5 +1683,201 @@ export async function getInventoryDashboard() {
     activeReservations: reservedCount,
     recentTransactions: recentTxs,
     generatedAt: new Date().toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 — roll/coil (lot) summary & consumption traceability
+// The scenario: coils received (optionally against a contract) sit in the
+// warehouse; each issue consumes part of a roll and the remainder stays as a
+// "partial" roll; every consumption is traceable back to its document and
+// purpose. All figures come from real ledger records — nothing derived twice.
+// ---------------------------------------------------------------------------
+
+export interface LotSummaryFilters {
+  materialId?: string;
+  warehouseId?: string;
+  lotNumber?: string;
+  q?: string;
+  status?: string;
+}
+
+/** Roll inventory answer: how many rolls, how many partial, how many consumed. */
+export async function getLotSummaries(filters: LotSummaryFilters) {
+  const aggregates = await loadLotAggregates(filters, 500);
+  const rows = aggregates
+    .filter((l) => (filters.status ? l.derivedStatus === filters.status : true))
+    .map((l) => {
+      const received = l.weightReceivedKg;
+      const remaining = l.weightRemainingKg;
+      const consumed = received.minus(remaining);
+      return {
+        id: l.id,
+        lotNumber: l.lotNumber,
+        supplierLotNumber: l.supplierLotNumber,
+        certificateNumber: l.certificateNumber,
+        receiptDate: l.receiptDate,
+        ownership: l.ownership,
+        status: l.status,
+        derivedStatus: l.derivedStatus,
+        derivedStatusFa: LOT_STATUS_FA[l.derivedStatus],
+        material: { id: l.materialId, code: l.materialCode, nameFa: l.materialNameFa, unit: l.unitCode },
+        weightReceivedKg: received.toFixed(3),
+        weightRemainingKg: remaining.toFixed(3),
+        consumedKg: consumed.toFixed(3),
+        consumedPct:
+          received.comparedTo(0) > 0
+            ? Number(consumed.div(received).mul(100).toFixed(1))
+            : 0,
+        quantityReceived: l.quantityReceived.toFixed(4),
+        quantityRemaining: l.quantityRemaining.toFixed(4),
+        contractNumbers: l.contractNumbers,
+        locations: l.locations,
+      };
+    });
+
+  const count = (s: string) => rows.filter((r) => r.derivedStatus === s).length;
+  const summary = {
+    total: rows.length,
+    full: count('FULL'),
+    partial: count('PARTIAL'),
+    consumed: count('CONSUMED'),
+    blocked: count('BLOCKED'),
+    totalReceivedKg: rows.reduce((a, r) => a.plus(r.weightReceivedKg), new D(0)).toFixed(3),
+    totalRemainingKg: rows.reduce((a, r) => a.plus(r.weightRemainingKg), new D(0)).toFixed(3),
+    generatedAt: new Date().toISOString(),
+  };
+  return { lots: rows, summary };
+}
+
+/** Full traceability of one roll: receipt, every issue (with purpose), reversals. */
+export async function getLotTrace(lotId: string) {
+  const lot = await db.materialLot.findUnique({
+    where: { id: lotId },
+    include: { material: { select: { materialCode: true, nameFa: true, baseUnit: { select: { code: true } } } } },
+  });
+  if (!lot) throw new ApiError(404, 'Lot not found', 'لوت یافت نشد', 'lot_not_found');
+
+  const [txs, contractTxs, balances] = await Promise.all([
+    db.inventoryTransaction.findMany({
+      where: { lotId },
+      orderBy: { occurredAt: 'asc' },
+      include: {
+        document: {
+          select: {
+            documentNumber: true,
+            documentType: true,
+            description: true,
+            referenceType: true,
+            referenceId: true,
+            postingStatus: true,
+            lines: { select: { notes: true } },
+          },
+        },
+        warehouse: { select: { code: true, nameFa: true } },
+        location: { select: { code: true, nameFa: true } },
+      },
+    }),
+    db.materialContractTransaction.findMany({
+      where: { lotId },
+      orderBy: { receivedDate: 'asc' },
+      include: { contract: { select: { contractNumber: true, supplierName: true } } },
+    }),
+    db.stockBalance.findMany({
+      where: { lotId },
+      include: {
+        warehouse: { select: { code: true, nameFa: true } },
+        location: { select: { code: true, nameFa: true } },
+        unit: { select: { code: true } },
+      },
+    }),
+  ]);
+
+  const moIds = [
+    ...new Set(
+      txs
+        .map((t) => (t.document?.referenceType === 'MANUFACTURING_ORDER' ? t.document.referenceId : null))
+        .filter((v): v is string => typeof v === 'string'),
+    ),
+  ];
+  const mos = moIds.length
+    ? await db.manufacturingOrder.findMany({ where: { id: { in: moIds } }, select: { id: true, moNumber: true } })
+    : [];
+  const moById = new Map(mos.map((m) => [m.id, m.moNumber]));
+
+  const movements = txs.map((t) => ({
+    transactionNumber: t.transactionNumber,
+    type: t.type,
+    direction: TX_SIGN[t.type] === 1 ? 'IN' : 'OUT',
+    quantity: new D(t.quantity).toFixed(4),
+    weightKg: t.weightKg != null ? new D(t.weightKg).toFixed(3) : null,
+    occurredAt: t.occurredAt,
+    warehouse: { code: t.warehouse.code, nameFa: t.warehouse.nameFa },
+    location: t.location ? { code: t.location.code, nameFa: t.location.nameFa } : null,
+    reversalOfTransaction: t.reversalOfId,
+    document: t.document
+      ? {
+          number: t.document.documentNumber,
+          type: t.document.documentType,
+          postingStatus: t.document.postingStatus,
+          referenceType: t.document.referenceType,
+          referenceLabel:
+            t.document.referenceType === 'MANUFACTURING_ORDER' && t.document.referenceId
+              ? (moById.get(t.document.referenceId) ?? 'دستور کار')
+              : t.document.referenceType,
+          purpose:
+            t.document.lines.map((l) => l.notes).find((n) => n && n.trim() !== '')?.trim() ||
+            t.document.description?.trim() ||
+            null,
+        }
+      : null,
+  }));
+
+  const derived = deriveLotStatus(lot);
+  const received = new D(lot.weightReceivedKg);
+  const remaining = new D(lot.weightRemainingKg);
+  const consumed = received.minus(remaining);
+  const issueCount = txs.filter((t) => t.type === 'ISSUE').length;
+
+  return {
+    lot: {
+      id: lot.id,
+      lotNumber: lot.lotNumber,
+      supplierLotNumber: lot.supplierLotNumber,
+      certificateNumber: lot.certificateNumber,
+      receiptDate: lot.receiptDate,
+      ownership: lot.ownership,
+      status: lot.status,
+      derivedStatus: derived,
+      derivedStatusFa: LOT_STATUS_FA[derived],
+      material: { id: lot.materialId, code: lot.material.materialCode, nameFa: lot.material.nameFa, unit: lot.material.baseUnit.code },
+      weightReceivedKg: received.toFixed(3),
+      weightRemainingKg: remaining.toFixed(3),
+      consumedKg: consumed.toFixed(3),
+      consumedPct: received.comparedTo(0) > 0 ? Number(consumed.div(received).mul(100).toFixed(1)) : 0,
+    },
+    contractReceipts: contractTxs.map((t) => ({
+      contractNumber: t.contract.contractNumber,
+      supplierName: t.contract.supplierName,
+      receivedDate: t.receivedDate,
+      quantity: new D(t.quantity).toFixed(4),
+      weightKg: t.weightKg != null ? new D(t.weightKg).toFixed(3) : null,
+    })),
+    balances: balances.map((b) => ({
+      warehouse: { code: b.warehouse.code, nameFa: b.warehouse.nameFa },
+      location: b.location ? { code: b.location.code, nameFa: b.location.nameFa } : null,
+      unit: b.unit.code,
+      quantity: new D(b.quantity).toFixed(4),
+      weightKg: new D(b.weightKg).toFixed(3),
+      qualityStatus: b.qualityStatus,
+      ownership: b.ownership,
+    })),
+    movements,
+    summary: {
+      issueCount,
+      movementCount: movements.length,
+      lastActivityAt: txs.length > 0 ? (txs[txs.length - 1]?.occurredAt ?? null) : null,
+      generatedAt: new Date().toISOString(),
+    },
   };
 }

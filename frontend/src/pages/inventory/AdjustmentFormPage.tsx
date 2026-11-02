@@ -123,6 +123,7 @@ export function AdjustmentFormPage() {
         items={[
           { to: '/inventory', label: 'داشبورد' },
           { to: '/inventory/adjustments/new', label: 'اصلاحیه جدید' },
+          { to: '/inventory/lots', label: 'رول‌ها و لوت‌ها' },
           { to: '/inventory/documents', label: 'سندها' },
         ]}
       />

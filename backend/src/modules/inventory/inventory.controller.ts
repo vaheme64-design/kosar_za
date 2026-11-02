@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import type { z } from 'zod';
+import { z } from 'zod';
 import { ApiError } from '../../lib/http';
 import {
   createDocument,
@@ -18,6 +18,8 @@ import {
   listContracts,
   createContract,
   listLots,
+  getLotSummaries,
+  getLotTrace,
   releaseQuality,
   getInventoryDashboard,
 } from './inventory.service';
@@ -155,6 +157,23 @@ export async function reservationsRelease(req: Request, res: Response) {
 export async function lotsList(req: Request, res: Response) {
   const materialId = typeof req.query.materialId === 'string' ? req.query.materialId : undefined;
   res.json({ lots: await listLots(materialId) });
+}
+
+const lotSummaryQuerySchema = z.object({
+  materialId: z.string().uuid().optional(),
+  warehouseId: z.string().uuid().optional(),
+  lotNumber: z.string().trim().max(64).optional(),
+  q: z.string().trim().max(100).optional(),
+  status: z.enum(['FULL', 'PARTIAL', 'CONSUMED', 'BLOCKED']).optional(),
+});
+
+export async function lotsSummary(req: Request, res: Response) {
+  const f = query(lotSummaryQuerySchema, req);
+  res.json(await getLotSummaries(f));
+}
+
+export async function lotTrace(req: Request, res: Response) {
+  res.json(await getLotTrace(param(req, 'id')));
 }
 
 export async function contractsList(_req: Request, res: Response) {
