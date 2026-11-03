@@ -336,6 +336,262 @@ async function consumeReservation(tx: Tx, reservationId: string, qty: Dec): Prom
 }
 
 // ---------------------------------------------------------------------------
+// Phase 8 — reservation availability (ATP), expiry sweep, MO auto-reserve.
+// Double allocation is prevented here: a reservation may never exceed
+// availableToReserve = approved on-hand − already-active reservations.
+// ---------------------------------------------------------------------------
+
+/** Mark expired ACTIVE reservations as EXPIRED (lazy sweep — safe to call often). */
+async function expireStaleReservations(tx: Tx): Promise<number> {
+  const res = await tx.inventoryReservation.updateMany({
+    where: { status: 'ACTIVE', expiresAt: { lt: new Date() } },
+    data: { status: 'EXPIRED' },
+  });
+  return res.count;
+}
+
+/** Active-reservation where-clause honouring the requested warehouse scope. */
+function activeReservationScope(warehouseId: string | null): Prisma.InventoryReservationWhereInput {
+  if (!warehouseId) return { status: 'ACTIVE' };
+  // an unscoped reservation covers every warehouse; a scoped one only its own
+  return { status: 'ACTIVE', OR: [{ warehouseId: null }, { warehouseId }] };
+}
+
+/** ATP inside an open transaction — same unit discipline as StockBalance rows. */
+async function availableToReserveInTx(
+  tx: Tx,
+  item: { partId: string | null; materialId: string | null; warehouseId: string | null; unitId: string },
+): Promise<Dec> {
+  const balances = await tx.stockBalance.aggregate({
+    where: {
+      partId: item.partId,
+      materialId: item.materialId,
+      unitId: item.unitId,
+      qualityStatus: 'APPROVED',
+      ...(item.warehouseId ? { warehouseId: item.warehouseId } : {}),
+    },
+    _sum: { quantity: true },
+  });
+  const reserved = await tx.inventoryReservation.aggregate({
+    where: {
+      partId: item.partId,
+      materialId: item.materialId,
+      unitId: item.unitId,
+      ...activeReservationScope(item.warehouseId),
+    },
+    _sum: { quantity: true },
+  });
+  const onHand = new D(balances._sum.quantity ?? 0);
+  const res = new D(reserved._sum.quantity ?? 0);
+  return onHand.minus(res).comparedTo(0) < 0 ? new D(0) : onHand.minus(res);
+}
+
+export interface AvailableToReserveRow {
+  partId: string | null;
+  materialId: string | null;
+  unitId: string;
+  unitCode: string;
+  onHandApproved: string;
+  reservedActive: string;
+  availableToReserve: string;
+}
+
+/** Readable ATP inquiry (per unit of measure) — backs the reservation form. */
+export async function getAvailableToReserve(filters: {
+  partId?: string;
+  materialId?: string;
+  warehouseId?: string;
+}): Promise<AvailableToReserveRow[]> {
+  const itemWhere: Prisma.StockBalanceWhereInput = {
+    partId: filters.partId,
+    materialId: filters.materialId,
+    qualityStatus: 'APPROVED',
+    ...(filters.warehouseId ? { warehouseId: filters.warehouseId } : {}),
+  };
+  const resWhere: Prisma.InventoryReservationWhereInput = {
+    partId: filters.partId,
+    materialId: filters.materialId,
+    ...activeReservationScope(filters.warehouseId ?? null),
+  };
+  await expireStaleReservations(db);
+  const [balanceGroups, reservationGroups] = await Promise.all([
+    db.stockBalance.groupBy({ by: ['unitId'], where: itemWhere, _sum: { quantity: true } }),
+    db.inventoryReservation.groupBy({ by: ['unitId'], where: resWhere, _sum: { quantity: true } }),
+  ]);
+  const unitIds = [...new Set([...balanceGroups.map((g) => g.unitId), ...reservationGroups.map((g) => g.unitId)])];
+  const units = await db.unitOfMeasure.findMany({ where: { id: { in: unitIds } }, select: { id: true, code: true } });
+  const unitCode = new Map(units.map((u) => [u.id, u.code]));
+  const out: AvailableToReserveRow[] = [];
+  for (const unitId of unitIds) {
+    const onHand = new D(balanceGroups.find((g) => g.unitId === unitId)?._sum.quantity ?? 0);
+    const reserved = new D(reservationGroups.find((g) => g.unitId === unitId)?._sum.quantity ?? 0);
+    const available = onHand.minus(reserved).comparedTo(0) < 0 ? new D(0) : onHand.minus(reserved);
+    out.push({
+      partId: filters.partId ?? null,
+      materialId: filters.materialId ?? null,
+      unitId,
+      unitCode: unitCode.get(unitId) ?? '',
+      onHandApproved: onHand.toFixed(4),
+      reservedActive: reserved.toFixed(4),
+      availableToReserve: available.toFixed(4),
+    });
+  }
+  // most usable unit first (the one with stock)
+  out.sort((a, b) => Number(b.onHandApproved) - Number(a.onHandApproved) || a.unitCode.localeCompare(b.unitCode));
+  return out;
+}
+
+export interface MoReserveResult {
+  moId: string;
+  moNumber: string;
+  reserved: {
+    reservationId: string;
+    materialId: string;
+    materialCode: string;
+    materialNameFa: string;
+    quantity: string;
+    unitCode: string;
+    created: boolean;
+  }[];
+  shortages: {
+    materialId: string;
+    materialCode: string;
+    required: string;
+    available: string;
+    shortage: string;
+    unitCode: string;
+  }[];
+  notes: string[];
+}
+
+/**
+ * Reserve the BOM materials of a manufacturing order against real ATP.
+ *
+ * Idempotent: re-running tops existing ACTIVE reservations of the same MO up
+ * to the requirement (it never reduces them — reduce via manual release).
+ * When ATP is insufficient the request still reserves what is available and
+ * reports the uncovered shortage — the MRP pre-issue check highlights it
+ * before any material is issued to the shop floor.
+ */
+export async function autoReserveForMo(moId: string, userId: string): Promise<MoReserveResult> {
+  return db.$transaction(async (tx) => {
+    const mo = await tx.manufacturingOrder.findUnique({
+      where: { id: moId },
+      include: { part: { select: { partNumber: true, nameFa: true } } },
+    });
+    if (!mo) throw new ApiError(404, 'Manufacturing order not found', 'دستور کار یافت نشد', 'mo_not_found');
+    if (!['PLANNED', 'RELEASED', 'IN_PROGRESS'].includes(mo.status)) {
+      throw new ApiError(409, 'Order is not active', 'رزرو مواد فقط برای دستور کار فعال امکان دارد', 'mo_status');
+    }
+    const bom = await tx.partMaterialRequirement.findMany({
+      where: { partId: mo.partId },
+      include: {
+        material: {
+          select: { materialCode: true, nameFa: true, baseUnitId: true, baseUnit: { select: { code: true } } },
+        },
+      },
+    });
+    if (bom.length === 0) {
+      throw new ApiError(422, 'Part has no BOM', 'برای این قطعه سرانه مصرف (BOM) ثبت نشده است', 'bom_missing');
+    }
+
+    await expireStaleReservations(tx);
+    const existing = await tx.inventoryReservation.findMany({
+      where: { forManufacturingOrderId: moId, status: 'ACTIVE', materialId: { not: null } },
+    });
+    const reserved: MoReserveResult['reserved'] = [];
+    const shortages: MoReserveResult['shortages'] = [];
+    const notes: string[] = [];
+
+    for (const row of bom) {
+      const baseUnitId = row.material.baseUnitId;
+      const required = new D(row.quantityPerUnit).mul(mo.quantity);
+      const sameUnit = existing.filter((r) => r.materialId === row.materialId && r.unitId === baseUnitId);
+      const otherUnit = existing.filter((r) => r.materialId === row.materialId && r.unitId !== baseUnitId);
+      const already = sameUnit.reduce((acc, r) => acc.plus(new D(r.quantity)), new D(0));
+      const delta = required.minus(already);
+
+      if (otherUnit.length > 0) {
+        notes.push(
+          `${row.material.materialCode}: ${otherUnit.length} رزرو با واحد متفاوت از واحد پایه نادیده گرفته شد`,
+        );
+      }
+
+      if (delta.comparedTo(0) <= 0) {
+        reserved.push({
+          reservationId: sameUnit[0]?.id ?? '',
+          materialId: row.materialId,
+          materialCode: row.material.materialCode,
+          materialNameFa: row.material.nameFa,
+          quantity: already.toFixed(4),
+          unitCode: row.material.baseUnit.code,
+          created: false,
+        });
+        continue;
+      }
+
+      const atp = await availableToReserveInTx(tx, {
+        partId: null,
+        materialId: row.materialId,
+        warehouseId: null,
+        unitId: baseUnitId,
+      });
+      const toReserve = D.min(delta, atp);
+      let reservationId = sameUnit[0]?.id ?? '';
+      if (toReserve.comparedTo(0) > 0) {
+        const created = await tx.inventoryReservation.create({
+          data: {
+            materialId: row.materialId,
+            unitId: baseUnitId,
+            quantity: toReserve,
+            forManufacturingOrderId: moId,
+            notes: `رزرو خودکار مواد دستور کار ${mo.moNumber}`,
+          },
+        });
+        reservationId = created.id;
+        await recordAudit(tx, {
+          userId,
+          action: 'CREATE',
+          entityType: 'InventoryReservation',
+          entityId: created.id,
+          changes: { moId, materialId: row.materialId, quantity: toReserve.toFixed(4), source: 'AUTO_FOR_MO' },
+        });
+      }
+      reserved.push({
+        reservationId,
+        materialId: row.materialId,
+        materialCode: row.material.materialCode,
+        materialNameFa: row.material.nameFa,
+        quantity: toReserve.toFixed(4),
+        unitCode: row.material.baseUnit.code,
+        created: toReserve.comparedTo(0) > 0,
+      });
+      if (atp.comparedTo(delta) < 0) {
+        shortages.push({
+          materialId: row.materialId,
+          materialCode: row.material.materialCode,
+          required: delta.toFixed(4),
+          available: atp.toFixed(4),
+          shortage: delta.minus(atp).toFixed(4),
+          unitCode: row.material.baseUnit.code,
+        });
+      }
+    }
+
+    return { moId, moNumber: mo.moNumber, reserved, shortages, notes };
+  });
+}
+
+/** Release every still-ACTIVE reservation of an MO (cancel/complete hook). */
+export async function releaseMoReservations(tx: Tx, moId: string): Promise<number> {
+  const res = await tx.inventoryReservation.updateMany({
+    where: { forManufacturingOrderId: moId, status: 'ACTIVE' },
+    data: { status: 'RELEASED' },
+  });
+  return res.count;
+}
+
+// ---------------------------------------------------------------------------
 // document creation (DRAFT — never affects stock; business rule 2)
 // ---------------------------------------------------------------------------
 
@@ -1125,6 +1381,30 @@ export async function createReservation(input: unknown, userId: string) {
         : (await tx.material.findUnique({ where: { id: parsed.materialId! } }))?.baseUnitId);
     if (!unitId) throw new ApiError(422, 'unitId could not be resolved', 'واحد شمارش مشخص نشده است', 'unit_required');
 
+    // double-allocation guard: reserve at most availableToReserve (phase 8)
+    await expireStaleReservations(tx);
+    const atp = await availableToReserveInTx(tx, {
+      partId: parsed.partId ?? null,
+      materialId: parsed.materialId ?? null,
+      warehouseId: parsed.warehouseId ?? null,
+      unitId,
+    });
+    const quantity = new D(parsed.quantity);
+    if (quantity.comparedTo(0) <= 0) {
+      throw new ApiError(422, 'Reservation quantity must be positive', 'مقدار رزرو باید مثبت باشد', 'reservation_qty');
+    }
+    if (parsed.expiresAt && new Date(parsed.expiresAt).getTime() <= Date.now()) {
+      throw new ApiError(422, 'Expiry must be in the future', 'تاریخ انقضای رزرو باید در آینده باشد', 'reservation_expired_date');
+    }
+    if (quantity.comparedTo(atp) > 0) {
+      throw new ApiError(
+        422,
+        `Reservation exceeds available stock (available: ${atp.toFixed(4)})`,
+        `رزرو بیش از موجودی آزاد است (موجودی آزاد: ${atp.toFixed(4)})`,
+        'reservation_exceeds_available',
+      );
+    }
+
     const reservation = await tx.inventoryReservation.create({
       data: {
         partId: parsed.partId ?? null,
@@ -1163,6 +1443,8 @@ export async function releaseReservation(id: string, userId: string) {
 }
 
 export async function listReservations(status?: string) {
+  // lazy expiry sweep so EXPIRED shows up without a background job
+  await expireStaleReservations(db);
   return db.inventoryReservation.findMany({
     where: { status: status as never },
     orderBy: { createdAt: 'desc' },

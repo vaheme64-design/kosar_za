@@ -64,7 +64,7 @@ export interface ReportDef {
   filters: string[];
 }
 
-/** The 13 management reports (catalog served on GET /reports). */
+/** Report catalog (served on GET /reports). */
 export const REPORT_CATALOG: ReportDef[] = [
   {
     key: 'plan-vs-actual',
@@ -156,6 +156,13 @@ export const REPORT_CATALOG: ReportDef[] = [
     descriptionFa: 'حواله‌های مصرف هر لوت با سند، مقصد و کاربرد (توضیح/دستور کار)، ابطال‌ها و جمع مصرف در برابر دریافتی',
     filters: ['from', 'to', 'materialId', 'lotNumber'],
   },
+  {
+    key: 'supplier-matrix',
+    titleFa: 'ماتریس حساب مواد تأمین‌کننده (گرید × ضخامت)',
+    descriptionFa: 'شبکه ماتریسی افتتاحیه، دریافت مالی، دریافت امانی، جمع مصرف و پایانی دوره به تفکیک گرید و ضخامت ورق — با تطبیق مستقل هر سطر با دفتر کل خام',
+    filters: ['from', 'to', 'materialId', 'groupBy'],
+  },
 ];
+
 
 export const REPORT_KEYS = REPORT_CATALOG.map((r) => r.key);

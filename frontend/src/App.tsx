@@ -23,6 +23,7 @@ import { ProductionTransfersPage } from './pages/production/ProductionTransfersP
 import { WipDashboardPage } from './pages/wip/WipDashboardPage';
 
 import { PlanningDashboardPage } from './pages/planning/PlanningDashboardPage';
+import { MrpPage } from './pages/planning/MrpPage';
 import { PlanDetailPage } from './pages/planning/PlanDetailPage';
 
 import { ReportsIndexPage } from './pages/reports/ReportsIndexPage';
@@ -86,8 +87,9 @@ export default function App() {
           <Route path="/production/transfers" element={<ProductionTransfersPage />} />
           <Route path="/wip" element={<WipDashboardPage />} />
 
-          {/* برنامه‌ریزی تولید — فاز ۴ */}
+          {/* برنامه‌ریزی تولید — فاز ۴ و MRP فاز ۸ */}
           <Route path="/production-planning" element={<PlanningDashboardPage />} />
+          <Route path="/production-planning/mrp" element={<MrpPage />} />
           <Route path="/production-planning/plans/:id" element={<PlanDetailPage />} />
 
           {/* گزارش‌های مدیریتی — فاز ۵ */}

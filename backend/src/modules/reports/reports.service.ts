@@ -15,6 +15,7 @@ import {
   CONSUMPTION_TX, INFLOW_TX, OUTFLOW_TX, TX_SIGN, dec, fmt, isoDate, ledgerTotalsByDims, dimsKey,
   machineUtilization, meta, resolvePeriod, table, endOfDay, ZERO,
 } from './reports.helpers';
+import { getSetting } from '../../lib/settings';
 import type { ReportTable, ReportColumn, DrillRef } from './reports.types';
 import type { ReportFilters } from './reports.schemas';
 
@@ -28,6 +29,10 @@ const OPEN_LINE_STATUSES: OrderLineStatus[] = ['OPEN', 'IN_PRODUCTION'];
 const OPEN_MO_STATUSES: MoStatus[] = ['PLANNED', 'RELEASED', 'IN_PROGRESS'];
 const ACTIVE_MO_STATUSES: MoStatus[] = ['RELEASED', 'IN_PROGRESS'];
 const DRILL_TAKE = 100;
+
+/** Phase 8 — ledger snapshot (mv_daily_ledger) freshness tracking. */
+const MV_REFRESHED_AT_KEY = 'reports.mvLedgerRefreshedAt';
+const MV_MIN_REFRESH_MINUTES = 5;
 
 function drill(kind: string, id: string, labelFa?: string): DrillRef {
   return { kind, id, labelFa };
@@ -1273,6 +1278,7 @@ const DRILL_KINDS = [
   'plan_line', 'order_line', 'wip_operation', 'wip_part_operation',
   'material_consumption_group', 'sapco_material', 'inventory_balance',
   'scrap_group', 'machine_period', 'movement_group', 'mo_detail',
+  'supplier_matrix_row',
 ] as const;
 
 function drillTable(key: string, titleFa: string, columns: ReportColumn[], rows: Record<string, unknown>[], filters: Record<string, string | undefined>, links: { labelFa: string; href: string }[] = []): ReportTable {
@@ -1683,6 +1689,11 @@ export async function drillDown(kind: string, id: string, f: { from?: string; to
       ]);
     }
 
+    case 'supplier_matrix_row': {
+      // id = "<grade>|<thickness>" (server-issued by the supplier-matrix report)
+      return supplierMatrixRowDrill(id, f);
+    }
+
     default:
       throw new ApiError(400, `Unhandled drill-down kind: ${kind}`, 'نوع جزئیات پشتیبانی نمی‌شود', 'bad_drill_kind');
   }
@@ -2030,5 +2041,411 @@ export async function lotConsumption(f: ReportFilters): Promise<ReportTable> {
     ],
     rows,
     m,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 — ledger snapshot (mv_daily_ledger) helpers
+// ---------------------------------------------------------------------------
+
+/** The materialized view is refreshed on demand; it is NEVER the source of truth. */
+export async function ledgerSnapshotStatus(): Promise<{ refreshedAt: string | null; ageMinutes: number | null }> {
+  const raw = await getSetting(MV_REFRESHED_AT_KEY, '');
+  if (!raw) return { refreshedAt: null, ageMinutes: null };
+  const t = new Date(raw);
+  if (Number.isNaN(t.getTime())) return { refreshedAt: null, ageMinutes: null };
+  return { refreshedAt: t.toISOString(), ageMinutes: Math.round((Date.now() - t.getTime()) / 60000) };
+}
+
+/**
+ * Refresh mv_daily_ledger (REFRESH ... CONCURRENTLY — readers are never blocked).
+ * Throttled: at most one refresh per minute unless forced. The timestamp is
+ * tracked in SystemSetting so the UI can show the snapshot age honestly.
+ */
+export async function refreshLedgerSnapshot(force = false): Promise<{ refreshed: boolean; refreshedAt: string; reason?: string }> {
+  const status = await ledgerSnapshotStatus();
+  if (!force && status.refreshedAt && (status.ageMinutes ?? 0) < MV_MIN_REFRESH_MINUTES) {
+    return { refreshed: false, refreshedAt: status.refreshedAt!, reason: 'FRESH' };
+  }
+  await db.$executeRawUnsafe('REFRESH MATERIALIZED VIEW CONCURRENTLY "mv_daily_ledger"');
+  const nowIso = new Date().toISOString();
+  await db.systemSetting.upsert({
+    where: { key: MV_REFRESHED_AT_KEY },
+    create: { key: MV_REFRESHED_AT_KEY, value: nowIso, description: 'آخرین تازه‌سازی تصویر روزانه دفتر کل (mv_daily_ledger)' },
+    update: { value: nowIso },
+  });
+  return { refreshed: true, refreshedAt: nowIso };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 — supplier material account MATRIX (grade × thickness)
+// ---------------------------------------------------------------------------
+
+interface MvAggRow {
+  material_key: string;
+  bucket: 'opening' | 'period';
+  type: string;
+  ownership: string;
+  w: Prisma.Decimal | null;
+}
+
+/**
+ * Supplier material account as a MATRIX grid.
+ *
+ * Rows are grouped by material grade × thickness (the way the steel stock is
+ * actually ordered/managed); `?groupBy=material` returns one row per material.
+ * Columns: opening balance, financial (owned) receipts, consignment receipts,
+ * total receipts, consumption, adjustments, closing balance — plus the live
+ * owned/consignment balances for reconciliation. The aggregation reads the
+ * materialized daily ledger (refreshed automatically when stale) and the
+ * closing column is reconciled against the raw ledger, so a stale snapshot
+ * can never pass silently.
+ */
+export async function supplierMatrix(f: ReportFilters): Promise<ReportTable> {
+  const { period, defaultApplied } = resolvePeriod(f.from, f.to);
+  const from = period.from;
+  const to = period.to;
+  const supplier = (await getSetting('materials.defaultSupplierName', 'SAPCO')) || 'SAPCO';
+  const groupByMaterial = f.groupBy === 'material';
+
+  const materials = await db.material.findMany({
+    where: {
+      supplierName: { equals: supplier, mode: 'insensitive' },
+      ...(f.materialId ? { id: f.materialId } : {}),
+    },
+    select: {
+      id: true, materialCode: true, nameFa: true, grade: true, thicknessMm: true,
+      baseUnit: { select: { code: true } },
+    },
+    orderBy: [{ materialCode: 'asc' }],
+  });
+  const materialIds = materials.map((m) => m.id);
+
+  // keep the snapshot honest without blocking the request
+  await refreshLedgerSnapshot(false);
+
+  // ---- daily-ledger aggregation (MV) -------------------------------------
+  const opening = new Map<string, D>();
+  const ownedReceipts = new Map<string, D>();
+  const consignmentReceipts = new Map<string, D>();
+  const consumption = new Map<string, D>();
+  const adjustments = new Map<string, D>();
+
+  if (materialIds.length > 0) {
+    const bucketExpr = from
+      ? Prisma.sql`CASE WHEN day < ${from} THEN 'opening' ELSE 'period' END`
+      : Prisma.sql`'period'`;
+    const rows = await db.$queryRaw<MvAggRow[]>(Prisma.sql`
+      SELECT material_key, ${bucketExpr} AS bucket, type, ownership, COALESCE(SUM(weight_kg_sum), 0) AS w
+      FROM "mv_daily_ledger"
+      WHERE material_key::text <> '00000000-0000-0000-0000-000000000000'
+        AND material_key::text IN (${Prisma.join(materialIds)})
+        ${to ? Prisma.sql`AND day <= ${to}` : Prisma.empty}
+      GROUP BY material_key, bucket, type, ownership
+    `);
+    for (const r of rows) {
+      const w = dec(r.w);
+      if (w.comparedTo(0) === 0) continue;
+      const mid = r.material_key;
+      if (r.bucket === 'opening') {
+        opening.set(mid, (opening.get(mid) ?? ZERO).plus(w.mul(TX_SIGN[r.type] ?? 0)));
+        continue;
+      }
+      if (r.type === 'RECEIPT' || r.type === 'TRANSFER_IN') {
+        if (r.ownership === 'SUPPLIER_CONSIGNMENT') consignmentReceipts.set(mid, (consignmentReceipts.get(mid) ?? ZERO).plus(w));
+        else ownedReceipts.set(mid, (ownedReceipts.get(mid) ?? ZERO).plus(w));
+      } else if (r.type === 'ISSUE') {
+        consumption.set(mid, (consumption.get(mid) ?? ZERO).plus(w));
+      } else if (r.type === 'ADJUSTMENT_IN') {
+        adjustments.set(mid, (adjustments.get(mid) ?? ZERO).plus(w));
+      } else if (r.type === 'ADJUSTMENT_OUT') {
+        adjustments.set(mid, (adjustments.get(mid) ?? ZERO).minus(w));
+      }
+    }
+  }
+
+  // ---- live balances for the reconciliation columns -----------------------
+  const balances = materialIds.length
+    ? await db.stockBalance.groupBy({
+        by: ['materialId', 'ownership'],
+        _sum: { weightKg: true },
+        where: { materialId: { in: materialIds } },
+      })
+    : [];
+  const liveOwned = new Map<string, D>();
+  const liveConsignment = new Map<string, D>();
+  for (const b of balances) {
+    if (!b.materialId) continue;
+    if (b.ownership === 'OWNED') liveOwned.set(b.materialId, dec(b._sum.weightKg));
+    else liveConsignment.set(b.materialId, dec(b._sum.weightKg));
+  }
+
+  // ---- per-material rows, then grouped matrix -----------------------------
+  interface MatRow {
+    materialId: string;
+    materialCode: string;
+    materialName: string;
+    grade: string;
+    thickness: string;
+    opening: D;
+    owned: D;
+    consign: D;
+    receipts: D;
+    consumed: D;
+    adjusted: D;
+    closing: D;
+    liveOwned: D;
+    liveConsign: D;
+    closingMatchesLedger: boolean;
+  }
+
+  // reconciliation against the RAW ledger (independent of the snapshot)
+  const ledgerTo = materialIds.length
+    ? await ledgerTotalsByDims({ materialId: { in: materialIds }, ...(to ? { occurredAt: { lte: to } } : {}) })
+    : new Map<string, { quantity: D; weightKg: D }>();
+  const ledgerClosingByMaterial = new Map<string, D>();
+  for (const [key, totals] of ledgerTo) {
+    const mid = key.split('|')[1];
+    if (mid) ledgerClosingByMaterial.set(mid, (ledgerClosingByMaterial.get(mid) ?? ZERO).plus(totals.weightKg));
+  }
+
+  const matRows: MatRow[] = materials.map((m) => {
+    const openingKg = opening.get(m.id) ?? ZERO;
+    const ownedKg = ownedReceipts.get(m.id) ?? ZERO;
+    const consignKg = consignmentReceipts.get(m.id) ?? ZERO;
+    const consumedKg = consumption.get(m.id) ?? ZERO;
+    const adjustedKg = adjustments.get(m.id) ?? ZERO;
+    const closingKg = openingKg.plus(ownedKg).plus(consignKg).minus(consumedKg).plus(adjustedKg);
+    const ledgerQty = ledgerClosingByMaterial.get(m.id) ?? ZERO;
+    return {
+      materialId: m.id,
+      materialCode: m.materialCode,
+      materialName: m.nameFa,
+      grade: m.grade ?? '—',
+      thickness: m.thicknessMm ? dec(m.thicknessMm).toFixed(3) : '—',
+      opening: openingKg,
+      owned: ownedKg,
+      consign: consignKg,
+      receipts: ownedKg.plus(consignKg),
+      consumed: consumedKg,
+      adjusted: adjustedKg,
+      closing: closingKg,
+      liveOwned: liveOwned.get(m.id) ?? ZERO,
+      liveConsign: liveConsignment.get(m.id) ?? ZERO,
+      closingMatchesLedger: closingKg.minus(ledgerQty).abs().comparedTo('0.0001') <= 0,
+    };
+  });
+
+  const sumRow = (rows: MatRow[]) => ({
+    opening: rows.reduce((a, r) => a.plus(r.opening), ZERO),
+    owned: rows.reduce((a, r) => a.plus(r.owned), ZERO),
+    consign: rows.reduce((a, r) => a.plus(r.consign), ZERO),
+    receipts: rows.reduce((a, r) => a.plus(r.receipts), ZERO),
+    consumed: rows.reduce((a, r) => a.plus(r.consumed), ZERO),
+    adjusted: rows.reduce((a, r) => a.plus(r.adjusted), ZERO),
+    closing: rows.reduce((a, r) => a.plus(r.closing), ZERO),
+    liveOwned: rows.reduce((a, r) => a.plus(r.liveOwned), ZERO),
+    liveConsign: rows.reduce((a, r) => a.plus(r.liveConsign), ZERO),
+  });
+
+  const columns: ReportColumn[] = groupByMaterial
+    ? [
+        { key: 'material', labelFa: 'ماده اولیه', kind: 'IDENTIFIER' },
+        { key: 'grade', labelFa: 'گرید', kind: 'IDENTIFIER' },
+        { key: 'thickness', labelFa: 'ضخامت (mm)', kind: 'IDENTIFIER' },
+        { key: 'openingKg', labelFa: 'افتتاحیه', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'ownedReceiptsKg', labelFa: 'دریافت مالی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'consignmentReceiptsKg', labelFa: 'دریافت امانی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'totalReceiptsKg', labelFa: 'جمع دریافت', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'consumptionKg', labelFa: 'جمع مصرف', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'adjustmentsKg', labelFa: 'تعدیلات', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'closingKg', labelFa: 'پایانی دوره', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'liveOwnedKg', labelFa: 'موجودی جاری مالی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'liveConsignmentKg', labelFa: 'موجودی جاری امانی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'closingMatchesLedger', labelFa: 'تطبیق با دفتر کل', kind: 'INFO' },
+        { key: '_drill', labelFa: 'جزئیات منبع', kind: 'INFO' },
+      ]
+    : [
+        { key: 'grade', labelFa: 'گرید', kind: 'IDENTIFIER' },
+        { key: 'thickness', labelFa: 'ضخامت (mm)', kind: 'IDENTIFIER' },
+        { key: 'materialsCount', labelFa: 'تعداد کالا', kind: 'INFO' },
+        { key: 'openingKg', labelFa: 'افتتاحیه', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'ownedReceiptsKg', labelFa: 'دریافت مالی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'consignmentReceiptsKg', labelFa: 'دریافت امانی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'totalReceiptsKg', labelFa: 'جمع دریافت', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'consumptionKg', labelFa: 'جمع مصرف', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'adjustmentsKg', labelFa: 'تعدیلات', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'closingKg', labelFa: 'پایانی دوره', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'liveOwnedKg', labelFa: 'موجودی جاری مالی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'liveConsignmentKg', labelFa: 'موجودی جاری امانی', kind: 'ACTUAL', unit: 'kg' },
+        { key: 'closingMatchesLedger', labelFa: 'تطبیق با دفتر کل', kind: 'INFO' },
+        { key: '_drill', labelFa: 'ریز مواد این گروه', kind: 'INFO' },
+      ];
+
+  const rows: Record<string, unknown>[] = [];
+  if (groupByMaterial) {
+    for (const r of matRows) {
+      rows.push({
+        materialId: r.materialId,
+        material: `${r.materialCode} — ${r.materialName}`,
+        grade: r.grade,
+        thickness: r.thickness,
+        openingKg: qty(r.opening),
+        ownedReceiptsKg: qty(r.owned),
+        consignmentReceiptsKg: qty(r.consign),
+        totalReceiptsKg: qty(r.receipts),
+        consumptionKg: qty(r.consumed),
+        adjustmentsKg: qty(r.adjusted),
+        closingKg: qty(r.closing),
+        liveOwnedKg: qty(r.liveOwned),
+        liveConsignmentKg: qty(r.liveConsign),
+        closingMatchesLedger: r.closingMatchesLedger,
+        _drill: drill('sapco_material', r.materialId, `جزئیات ${r.materialCode}`),
+      });
+    }
+    const t = sumRow(matRows);
+    rows.push({
+      material: 'جمع کل',
+      grade: '',
+      thickness: '',
+      openingKg: qty(t.opening),
+      ownedReceiptsKg: qty(t.owned),
+      consignmentReceiptsKg: qty(t.consign),
+      totalReceiptsKg: qty(t.receipts),
+      consumptionKg: qty(t.consumed),
+      adjustmentsKg: qty(t.adjusted),
+      closingKg: qty(t.closing),
+      liveOwnedKg: qty(t.liveOwned),
+      liveConsignmentKg: qty(t.liveConsign),
+      closingMatchesLedger: matRows.every((r) => r.closingMatchesLedger),
+    });
+  } else {
+    // matrix: group by (grade, thickness), preserving grade/thickness ordering
+    const groups = new Map<string, MatRow[]>();
+    for (const r of matRows) {
+      const key = `${r.grade}\u0000${r.thickness}`;
+      const list = groups.get(key) ?? [];
+      list.push(r);
+      groups.set(key, list);
+    }
+    const ordered = [...groups.entries()].sort((a, b) => {
+      const [g1 = '', t1 = ''] = a[0].split('\u0000');
+      const [g2 = '', t2 = ''] = b[0].split('\u0000');
+      return g1.localeCompare(g2, 'fa') || (Number(t1) || 0) - (Number(t2) || 0);
+    });
+    for (const [key, list] of ordered) {
+      const [grade, thickness] = key.split('\u0000');
+      const t = sumRow(list);
+      const drillId = `${grade}|${thickness}`;
+      rows.push({
+        groupId: drillId,
+        grade,
+        thickness,
+        materialsCount: list.length,
+        openingKg: qty(t.opening),
+        ownedReceiptsKg: qty(t.owned),
+        consignmentReceiptsKg: qty(t.consign),
+        totalReceiptsKg: qty(t.receipts),
+        consumptionKg: qty(t.consumed),
+        adjustmentsKg: qty(t.adjusted),
+        closingKg: qty(t.closing),
+        liveOwnedKg: qty(t.liveOwned),
+        liveConsignmentKg: qty(t.liveConsign),
+        closingMatchesLedger: list.every((r) => r.closingMatchesLedger),
+        _drill: drill('supplier_matrix_row', drillId, `ریز مواد گرید ${grade} ضخامت ${thickness}`),
+      });
+    }
+    const t = sumRow(matRows);
+    rows.push({
+      grade: 'جمع کل',
+      thickness: '',
+      materialsCount: matRows.length,
+      openingKg: qty(t.opening),
+      ownedReceiptsKg: qty(t.owned),
+      consignmentReceiptsKg: qty(t.consign),
+      totalReceiptsKg: qty(t.receipts),
+      consumptionKg: qty(t.consumed),
+      adjustmentsKg: qty(t.adjusted),
+      closingKg: qty(t.closing),
+      liveOwnedKg: qty(t.liveOwned),
+      liveConsignmentKg: qty(t.liveConsign),
+      closingMatchesLedger: matRows.every((r) => r.closingMatchesLedger),
+    });
+  }
+
+  const snapshot = await ledgerSnapshotStatus();
+  const notes = [
+    `ارقام کیلوگرمی و بر پایه تصویر روزانه دفتر کل (mv_daily_ledger) است که مستقیماً از تراکنش‌های قطع‌بوش‌شده ساخته می‌شود؛ ستون «تطبیق با دفتر کل» هر سطر را مستقلاً با دفتر کل خام می‌سنجد.`,
+    '«دریافت مالی» = رسید متعلق به کارخانه (OWNED)؛ «دریافت امانی» = ورق تأمین‌کننده در انبار ما (SUPPLIER_CONSIGNMENT) — همیشه جدا از هم.',
+    'ستون «پایانی دوره» = افتتاحیه + جمع دریافت − مصرف + تعدیلات؛ «موجودی جاری» از موجودی رسمی همین لحظه است (برای تطبیق چشمی).',
+    `تامین‌کننده گزارش از تنظیمات سامانه خوانده می‌شود (فعلی: ${supplier}).`,
+    snapshot.refreshedAt
+      ? `تازه‌سازی تصویر دفتر کل: ${Math.round((Date.now() - new Date(snapshot.refreshedAt).getTime()) / 60000)} دقیقه پیش.`
+      : 'تصویر دفتر کل هنوز تازه‌سازی نشده بود و در همین اجرا ساخته شد.',
+  ];
+  if (defaultApplied) notes.push('بازه پیش‌فرض ۳۰ روز گذشته اعمال شده است؛ افتتاحیه کل سابقه قبل از ابتدای دوره را در بر می‌گیرد.');
+
+  return table(
+    'supplier-matrix',
+    'ماتریس حساب مواد تأمین‌کننده (گرید × ضخامت)',
+    columns,
+    rows,
+    meta(f, notes, defaultApplied ? { from: isoDate(period.from!), to: isoDate(period.to!), basisFa: '۳۰ روز گذشته' } : undefined),
+  );
+}
+
+/** Drill into one (grade × thickness) cell of the supplier matrix. */
+async function supplierMatrixRowDrill(groupd: string, f: { from?: string; to?: string }): Promise<ReportTable> {
+  const sep = groupd.lastIndexOf('|');
+  const grade = sep >= 0 ? groupd.slice(0, sep) : groupd;
+  const thickness = sep >= 0 ? groupd.slice(sep + 1) : '';
+  const supplier = (await getSetting('materials.defaultSupplierName', 'SAPCO')) || 'SAPCO';
+  // '—' means "no grade/thickness on the material" — filter for NULL, not for all
+  const gradeFilter = grade === '—' ? { grade: null } : grade ? { grade } : {};
+  const thicknessFilter = thickness === '—' ? { thicknessMm: null } : thickness ? { thicknessMm: { equals: dec(thickness) } } : {};
+  const materials = await db.material.findMany({
+    where: {
+      supplierName: { equals: supplier, mode: 'insensitive' },
+      ...gradeFilter,
+      ...thicknessFilter,
+    },
+    select: { id: true, materialCode: true, nameFa: true, grade: true, thicknessMm: true },
+  });
+  const ids = materials.map((m) => m.id);
+  const ledgerTo = ids.length
+    ? await ledgerTotalsByDims({ materialId: { in: ids }, ...(f.to ? { occurredAt: { lte: endOfDay(new Date(`${f.to}T00:00:00Z`)) } } : {}) })
+    : new Map<string, { quantity: D; weightKg: D }>();
+  const closingByMaterial = new Map<string, D>();
+  for (const [key, totals] of ledgerTo) {
+    const mid = key.split('|')[1];
+    if (mid) closingByMaterial.set(mid, (closingByMaterial.get(mid) ?? ZERO).plus(totals.weightKg));
+  }
+  const balances = ids.length
+    ? await db.stockBalance.groupBy({ by: ['materialId', 'ownership'], _sum: { weightKg: true }, where: { materialId: { in: ids } } })
+    : [];
+  const rows = materials.map((m) => ({
+    materialId: m.id,
+    material: `${m.materialCode} — ${m.nameFa}`,
+    grade: m.grade ?? '—',
+    thickness: m.thicknessMm ? dec(m.thicknessMm).toFixed(3) : '—',
+    closingKg: qty(closingByMaterial.get(m.id) ?? ZERO),
+    ownedKg: qty(balances.filter((b) => b.materialId === m.id && b.ownership === 'OWNED').reduce((a, b) => a.plus(dec(b._sum.weightKg)), ZERO)),
+    consignmentKg: qty(balances.filter((b) => b.materialId === m.id && b.ownership !== 'OWNED').reduce((a, b) => a.plus(dec(b._sum.weightKg)), ZERO)),
+    _drill: drill('sapco_material', m.id, `جزئیات ${m.materialCode}`),
+  }));
+  return table(
+    'supplier-matrix-row',
+    `ریز مواد گرید ${grade} — ضخامت ${thickness}`,
+    [
+      { key: 'material', labelFa: 'ماده اولیه', kind: 'IDENTIFIER' },
+      { key: 'grade', labelFa: 'گرید', kind: 'IDENTIFIER' },
+      { key: 'thickness', labelFa: 'ضخامت (mm)', kind: 'IDENTIFIER' },
+      { key: 'closingKg', labelFa: 'پایانی دوره (kg)', kind: 'ACTUAL', unit: 'kg' },
+      { key: 'ownedKg', labelFa: 'موجودی مالی (kg)', kind: 'ACTUAL', unit: 'kg' },
+      { key: 'consignmentKg', labelFa: 'موجودی امانی (kg)', kind: 'ACTUAL', unit: 'kg' },
+      { key: '_drill', labelFa: 'جزئیات منبع', kind: 'INFO' },
+    ],
+    rows,
+    meta({} as ReportFilters, ['ریز مواد سطر انتخاب‌شده ماتریس حساب مواد تأمین‌کننده.']),
   );
 }

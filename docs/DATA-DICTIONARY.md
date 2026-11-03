@@ -512,6 +512,8 @@
 
 - `@@unique([orderId, lineNo])`
 - `@@index([partId])`
+- `@@index([dueDate])`
+- `@@index([status])`
 
 ### ProductionPlan → `production_plans`
 
@@ -673,6 +675,7 @@
 - `@@index([partId])`
 - `@@index([status])`
 - `@@index([dueDate])`
+- `@@index([completedAt])`
 - `@@index([routeId])`
 - `@@index([planLineId])`
 
@@ -719,6 +722,7 @@
 - `@@index([operationId])`
 - `@@index([machineId])`
 - `@@index([status])`
+- `@@index([plannedEnd])`
 
 ### ProductionReport → `production_reports`
 

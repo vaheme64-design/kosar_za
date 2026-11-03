@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowRight, ClipboardEdit, CheckCircle2, Send, Undo2 } from 'lucide-react';
+import { ArrowRight, ClipboardEdit, CheckCircle2, Send, Undo2, PackageCheck, Loader2 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../context/AuthContext';
 import { Page, Card, Table, EmptyState, Loading, ErrorBanner, SuccessBanner, Badge, Qty, Progress, fa } from '../../components/ui';
@@ -48,6 +48,27 @@ interface TransferRow {
   fromWarehouse?: { nameFa: string } | null;
 }
 
+/** Phase 8 — pre-issue material check (MRP module). */
+interface MoCheckLine {
+  materialId: string;
+  materialCode: string;
+  materialNameFa: string;
+  unitCode: string;
+  requiredQuantity: string;
+  alreadyIssuedQuantity: string;
+  remainingRequired: string;
+  availableForThisMo: string;
+  shortageQuantity: string;
+  status: 'NOT_REQUIRED' | 'READY' | 'SHORTAGE';
+}
+
+interface MoCheckResult {
+  moNumber: string;
+  readyToIssue: boolean;
+  lines: MoCheckLine[];
+  notes: string[];
+}
+
 export function MoDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { can } = useAuth();
@@ -57,6 +78,9 @@ export function MoDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [moCheck, setMoCheck] = useState<MoCheckResult | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [reserving, setReserving] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -79,6 +103,42 @@ export function MoDetailPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // phase 8: pre-issue material check — loaded alongside the order
+  const runCheck = useCallback(async () => {
+    if (!id) return;
+    setChecking(true);
+    try {
+      setMoCheck(await api<MoCheckResult>(`/mrp/mos/${id}/check`));
+    } catch {
+      setMoCheck(null); // the card hides itself when the check is unavailable
+    } finally {
+      setChecking(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    void runCheck();
+  }, [runCheck]);
+
+  const autoReserve = async () => {
+    if (!id) return;
+    setReserving(true);
+    setError(null);
+    try {
+      const res = await api<{ reserved: { created: boolean }[]; shortages: unknown[]; moNumber: string }>(
+        `/mrp/mos/${id}/reserve`,
+        { method: 'POST' },
+      );
+      const created = res.reserved.filter((r) => r.created).length;
+      setNotice(res.shortages.length > 0 ? `رزرو انجام شد ولی کسری پوشش‌نیافته وجود دارد (${res.shortages.length} ماده)` : `رزرو خودکار مواد ${res.moNumber} انجام شد (${created} رزرو جدید)`);
+      await runCheck();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'خطا در رزرو خودکار مواد');
+    } finally {
+      setReserving(false);
+    }
+  };
 
   const act = async (path: string, message: string, body?: unknown) => {
     setBusy(true);
@@ -119,6 +179,44 @@ export function MoDetailPage() {
     >
       <SuccessBanner message={notice} />
       <ErrorBanner message={error} />
+
+      {moCheck && moCheck.lines.length > 0 && (
+        <Card
+          title="مواد لازم (بررسی پیش از حواله)"
+          note="نیاز باقی‌مانده = سرانه BOM × مقدار دستور کار − مصرف ثبت‌شده همین دستور کار؛ موجودی آزاد، رزروهای سایر دستور کارها را کنار می‌گذارد"
+          actions={
+            <>
+              {checking && <Loader2 size={15} className="spin" />}
+              {can('inventory.manage') && mo.status !== 'COMPLETED' && mo.status !== 'CANCELLED' && (
+                <button className="btn btn--sm" onClick={() => void autoReserve()} disabled={reserving} type="button">
+                  {reserving ? <Loader2 size={13} className="spin" /> : <PackageCheck size={13} />} رزرو خودکار مواد
+                </button>
+              )}
+            </>
+          }
+        >
+          <p style={{ marginTop: 0 }}>
+            <Badge tone={moCheck.readyToIssue ? 'ok' : 'danger'}>{moCheck.readyToIssue ? 'مواد کافی — قابل حواله' : 'کسری مواد'}</Badge>
+          </p>
+          <Table head={['ماده', 'نیاز کل', 'مصرف‌شده', 'نیاز باقی‌مانده', 'آزاد برای این دستور', 'کسری', 'وضعیت']} dense>
+            {moCheck.lines.map((l) => (
+              <tr key={l.materialId}>
+                <td>{l.materialCode} — {l.materialNameFa}</td>
+                <td><Qty value={l.requiredQuantity} unit={l.unitCode} /></td>
+                <td><Qty value={l.alreadyIssuedQuantity} /></td>
+                <td><Qty value={l.remainingRequired} /></td>
+                <td><Qty value={l.availableForThisMo} /></td>
+                <td>{l.shortageQuantity !== '0.0000' ? <strong><Qty value={l.shortageQuantity} unit={l.unitCode} /></strong> : '—'}</td>
+                <td>
+                  <Badge tone={l.status === 'SHORTAGE' ? 'danger' : l.status === 'READY' ? 'ok' : 'muted'}>
+                    {l.status === 'SHORTAGE' ? 'کسری' : l.status === 'READY' ? 'آماده حواله' : 'نیازی ندارد'}
+                  </Badge>
+                </td>
+              </tr>
+            ))}
+          </Table>
+        </Card>
+      )}
 
       <Card title="پیشرفت کلی">
         <Progress percent={progress} />

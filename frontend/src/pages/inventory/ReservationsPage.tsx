@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Lock, Plus, Unlock } from 'lucide-react';
+import { Lock, Plus, Unlock, Gauge } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
 import { Page, Card, Modal, Field, TextInput, Select, Button, Table, EmptyState, Loading, ErrorBanner, SuccessBanner, Badge, Qty, fa } from '../../components/ui';
@@ -20,6 +20,15 @@ interface ReservationRow {
   createdAt: string;
 }
 
+/** Phase 8 — available-to-reserve (ATP) row from the server. */
+interface AtpRow {
+  unitId: string;
+  unitCode: string;
+  onHandApproved: string;
+  reservedActive: string;
+  availableToReserve: string;
+}
+
 export function ReservationsPage() {
   const { lookups, loading: lookupsLoading } = useLookups();
   const [rows, setRows] = useState<ReservationRow[]>([]);
@@ -29,6 +38,8 @@ export function ReservationsPage() {
   const [busy, setBusy] = useState(false);
   const [modal, setModal] = useState(false);
   const [form, setForm] = useState({ kind: 'MATERIAL', itemId: '', quantity: '', warehouseId: '', notes: '' });
+  const [atp, setAtp] = useState<AtpRow[] | null>(null);
+  const [atpLoading, setAtpLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -46,6 +57,36 @@ export function ReservationsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // live ATP for the picked item+warehouse inside the create modal (phase 8)
+  useEffect(() => {
+    if (!modal || !form.itemId) {
+      setAtp(null);
+      return;
+    }
+    let cancelled = false;
+    setAtpLoading(true);
+    const params = new URLSearchParams();
+    params.set(form.kind === 'MATERIAL' ? 'materialId' : 'partId', form.itemId);
+    if (form.warehouseId) params.set('warehouseId', form.warehouseId);
+    api<{ availability: AtpRow[] }>(`/inventory/available-to-reserve?${params.toString()}`)
+      .then((res) => {
+        if (!cancelled) setAtp(res.availability);
+      })
+      .catch(() => {
+        if (!cancelled) setAtp(null);
+      })
+      .finally(() => {
+        if (!cancelled) setAtpLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [modal, form.itemId, form.warehouseId, form.kind]);
+
+  const atpForForm = atp?.[0] ?? null;
+  const overReserve =
+    atpForForm !== null && form.quantity !== '' && Number(form.quantity) > Number(atpForForm.availableToReserve);
 
   const create = async () => {
     if (!form.itemId) return setError('قلم را انتخاب کنید');
@@ -122,7 +163,7 @@ export function ReservationsPage() {
                 <td><Qty value={r.quantity} unit={r.unit.code} /></td>
                 <td>{r.forManufacturingOrder?.moNumber ?? '—'}</td>
                 <td>
-                  <Badge tone={r.status === 'ACTIVE' ? 'primary' : r.status === 'CONSUMED' ? 'ok' : 'muted'}>{fa(r.status)}</Badge>
+                  <Badge tone={r.status === 'ACTIVE' ? 'primary' : r.status === 'CONSUMED' ? 'ok' : r.status === 'EXPIRED' ? 'warn' : 'muted'}>{fa(r.status)}</Badge>
                 </td>
                 <td className="muted">{r.notes ?? '—'}</td>
                 <td className="muted">{new Date(r.createdAt).toLocaleDateString('fa-IR')}</td>
@@ -161,6 +202,22 @@ export function ReservationsPage() {
             <Field label="مقدار" required>
               <TextInput type="number" min="0" step="0.001" value={form.quantity} onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))} />
             </Field>
+            {form.itemId && (
+              <div className="form-grid__full" style={{ gridColumn: '1 / -1' }}>
+                {atpLoading && <Loading label="محاسبه موجودی آزاد…" />}
+                {!atpLoading && atpForForm && (
+                  <Card title="موجودی آزاد برای رزرو (ATP)" note="موجودی قطعی تأییدشده منهای رزروهای فعال — رزرو بیش از این مقدار توسط سرور رد می‌شود">
+                    <div style={{ display: 'flex', gap: '1.5rem', flexWrap: 'wrap' }}>
+                      <span>موجودی قطعی: <Qty value={atpForForm.onHandApproved} unit={atpForForm.unitCode} /></span>
+                      <span>رزرو فعال: <Qty value={atpForForm.reservedActive} unit={atpForForm.unitCode} /></span>
+                      <strong style={{ color: overReserve ? 'var(--danger, #c0392b)' : undefined }}>
+                        قابل رزرو: <Qty value={atpForForm.availableToReserve} unit={atpForForm.unitCode} />
+                      </strong>
+                    </div>
+                  </Card>
+                )}
+              </div>
+            )}
             <Field label="انبار (اختیاری)">
               <Select value={form.warehouseId} onChange={(e) => setForm((f) => ({ ...f, warehouseId: e.target.value }))}>
                 <option value="">— همه انبارها —</option>
@@ -174,8 +231,11 @@ export function ReservationsPage() {
             </Field>
           </div>
           <div className="form-actions">
-            <Button onClick={() => void create()} disabled={busy} type="button">
-              <Lock size={15} /> ایجاد رزرو
+            {overReserve && (
+              <ErrorBanner message={`مقدار واردشده بیش از موجودی آزاد است (قابل رزرو: ${atpForForm?.availableToReserve ?? '0'})`} />
+            )}
+            <Button onClick={() => void create()} disabled={busy || overReserve} type="button">
+              <Gauge size={15} /> ایجاد رزرو
             </Button>
           </div>
         </Modal>

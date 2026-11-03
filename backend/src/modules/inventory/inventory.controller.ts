@@ -11,6 +11,8 @@ import {
   createReservation,
   releaseReservation,
   listReservations,
+  getAvailableToReserve,
+  autoReserveForMo,
   getBalances,
   getReservedSummary,
   getLedger,
@@ -28,6 +30,8 @@ import {
   createContractSchema,
   createDocumentSchema,
   createReservationSchema,
+  availableToReserveQuerySchema,
+  autoReserveForMoSchema,
   ledgerFilterSchema,
   qualityReleaseSchema,
   reverseDocumentSchema,
@@ -152,6 +156,19 @@ export async function reservationsCreate(req: Request, res: Response) {
 export async function reservationsRelease(req: Request, res: Response) {
   const reservation = await releaseReservation(param(req, "id"), userId(req));
   res.json({ reservation });
+}
+
+/** Phase 8 — available-to-reserve (ATP) inquiry for the reservation form. */
+export async function availableToReserve(req: Request, res: Response) {
+  const f = query(availableToReserveQuerySchema, req);
+  res.json({ availability: await getAvailableToReserve(f) });
+}
+
+/** Phase 8 — reserve an MO's BOM materials against real ATP. */
+export async function reservationsAutoForMo(req: Request, res: Response) {
+  const parsed = autoReserveForMoSchema.parse(req.body);
+  const result = await autoReserveForMo(parsed.moId, userId(req));
+  res.status(201).json(result);
 }
 
 export async function lotsList(req: Request, res: Response) {

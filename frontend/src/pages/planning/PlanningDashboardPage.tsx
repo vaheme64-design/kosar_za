@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { CalendarClock, Play, Plus, ChevronLeft, ClipboardList, Package, Factory } from 'lucide-react';
+import { CalendarClock, Play, Plus, ChevronLeft, ClipboardList, Package, Factory, Calculator } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
 import { Page, Card, Modal, Field, TextInput, Select, Button, Table, EmptyState, Loading, ErrorBanner, Badge, Qty, StatCardLike, fa } from '../../components/ui';
@@ -206,6 +206,9 @@ export function PlanningDashboardPage() {
               <Button onClick={() => void runPlanning()} disabled={busy} type="button">
                 <Play size={15} /> اجرای برنامه‌ریزی
               </Button>
+              <Link to="/production-planning/mrp" className="btn btn--ghost" style={{ textDecoration: 'none' }}>
+                <Calculator size={15} /> محاسبه نیاز مواد (MRP) — بدون ثبت برنامه
+              </Link>
             </div>
           </Card>
 

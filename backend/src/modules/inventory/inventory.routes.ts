@@ -22,7 +22,9 @@ inventoryRouter.get('/sapco/account', requirePermission('inventory.view'), ctrl.
 // ---- write (manage) ----
 inventoryRouter.post('/documents', requirePermission('inventory.manage'), ctrl.documentsCreate);
 inventoryRouter.post('/reservations', requirePermission('inventory.manage'), ctrl.reservationsCreate);
+inventoryRouter.post('/reservations/auto-for-mo', requirePermission('inventory.manage'), ctrl.reservationsAutoForMo);
 inventoryRouter.post('/reservations/:id/release', requirePermission('inventory.manage'), ctrl.reservationsRelease);
+inventoryRouter.get('/available-to-reserve', requirePermission('inventory.view'), ctrl.availableToReserve);
 inventoryRouter.post('/contracts', requirePermission('inventory.manage'), ctrl.contractsCreate);
 inventoryRouter.post('/quality/release', requirePermission('inventory.manage'), ctrl.qualityRelease);
 

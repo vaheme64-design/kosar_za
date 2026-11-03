@@ -23,8 +23,11 @@ import {
   productionDelays,
   sapcoAccount,
   scrapReport,
+  supplierMatrix,
   wipAging,
   wipByPartOperation,
+  refreshLedgerSnapshot,
+  ledgerSnapshotStatus,
 } from './reports.service';
 
 type ReportFn = (f: ReportFilters) => Promise<ReportTable>;
@@ -45,6 +48,7 @@ const REPORTS: Record<string, ReportFn> = {
   'inventory-reconciliation': inventoryReconciliation,
   'coil-inventory': coilInventory,
   'lot-consumption': lotConsumption,
+  'supplier-matrix': supplierMatrix,
 };
 
 /** Safe route-param/query parsing — empty query strings are dropped. */
@@ -97,4 +101,15 @@ export async function reportDrillDown(req: Request, res: Response): Promise<void
   }
   const q = drillDownSchema.parse(cleaned) as z.infer<typeof drillDownSchema>;
   res.json(await drillDown(q.kind, q.id, { from: q.from, to: q.to }));
+}
+
+/** Phase 8 — refresh the materialized daily ledger snapshot (throttled server-side). */
+export async function refreshSnapshots(req: Request, res: Response): Promise<void> {
+  const force = req.query.force === 'true';
+  res.json(await refreshLedgerSnapshot(force));
+}
+
+/** Phase 8 — snapshot freshness for the dashboard/report header. */
+export async function snapshotStatus(_req: Request, res: Response): Promise<void> {
+  res.json(await ledgerSnapshotStatus());
 }

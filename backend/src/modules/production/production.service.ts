@@ -3,6 +3,7 @@ import { db } from '../../config/db';
 import { ApiError } from '../../lib/http';
 import { recordAudit } from '../../lib/audit';
 import { generateDocumentNumber } from '../../services/documentNumber.service';
+import { releaseMoReservations } from '../inventory/inventory.service';
 import {
   createMoSchema,
   createReportSchema,
@@ -236,7 +237,9 @@ export async function cancelManufacturingOrder(id: string, userId: string, meta:
     }
     const updated = await tx.manufacturingOrder.update({ where: { id }, data: { status: 'CANCELLED' } });
     await tx.productionOperation.updateMany({ where: { manufacturingOrderId: id }, data: { status: 'CANCELLED' } });
-    await recordAudit(tx, { userId, action: 'CANCEL', entityType: 'ManufacturingOrder', entityId: id, ipAddress: meta.ip, userAgent: meta.ua });
+    // phase 8: a cancelled order must not keep material locked
+    const releasedReservations = await releaseMoReservations(tx, id);
+    await recordAudit(tx, { userId, action: 'CANCEL', entityType: 'ManufacturingOrder', entityId: id, changes: { releasedReservations }, ipAddress: meta.ip, userAgent: meta.ua });
     return updated;
   });
 }
@@ -266,7 +269,9 @@ export async function completeManufacturingOrder(id: string, userId: string, met
       where: { manufacturingOrderId: id, status: { in: ['PENDING', 'QUEUED', 'IN_PROGRESS', 'PAUSED'] } },
       data: { status: 'COMPLETED' },
     });
-    await recordAudit(tx, { userId, action: 'COMPLETE', entityType: 'ManufacturingOrder', entityId: id, ipAddress: meta.ip, userAgent: meta.ua });
+    // phase 8: leftover reservations of a completed order are freed
+    const releasedReservations = await releaseMoReservations(tx, id);
+    await recordAudit(tx, { userId, action: 'COMPLETE', entityType: 'ManufacturingOrder', entityId: id, changes: { releasedReservations }, ipAddress: meta.ip, userAgent: meta.ua });
     return updated;
   });
 }

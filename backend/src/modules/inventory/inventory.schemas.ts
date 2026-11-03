@@ -213,6 +213,25 @@ export const createReservationSchema = z
     }
   });
 
+/** Phase 8 — query for the available-to-reserve (ATP) inquiry. */
+export const availableToReserveQuerySchema = z
+  .object({
+    partId: z.string().uuid().optional(),
+    materialId: z.string().uuid().optional(),
+    warehouseId: z.string().uuid().optional(),
+  })
+  .superRefine((r, ctx) => {
+    if (!r.partId && !r.materialId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['partId'], message: 'partId or materialId is required' });
+    }
+    if (r.partId && r.materialId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['partId'], message: 'Choose either part or material, not both' });
+    }
+  });
+
+/** Phase 8 — reserve a manufacturing order's BOM materials against real ATP. */
+export const autoReserveForMoSchema = z.object({ moId: z.string().uuid() });
+
 // ---------------------------------------------------------------------------
 // Material contracts (قراردادهای ماده اولیه — تأمین‌کنندهٔ پیش‌فرض از تنظیمات
 // سامانه خوانده می‌شود، در کد نوشته نشده است)

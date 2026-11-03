@@ -13,8 +13,12 @@ export const reportsRouter = Router();
 
 reportsRouter.use(authenticate, requirePermission('reports.view'));
 
-// report catalog (the 13 management reports)
+// report catalog (the management reports)
 reportsRouter.get('/', ctrl.reportsCatalog);
+
+// phase 8 — ledger snapshot (materialized view) maintenance
+reportsRouter.get('/snapshot-status', ctrl.snapshotStatus);
+reportsRouter.post('/refresh-snapshots', requirePermission('reports.manage'), ctrl.refreshSnapshots);
 
 // drill-down from summary figures to source documents
 reportsRouter.get('/drill-down', ctrl.reportDrillDown);

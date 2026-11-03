@@ -5,6 +5,7 @@ import { dashboardRouter } from '../modules/dashboard/dashboard.routes';
 import { inventoryRouter } from '../modules/inventory/inventory.routes';
 import { productionRouter, wipRouter } from '../modules/production/production.routes';
 import { planningRouter } from '../modules/planning/planning.routes';
+import { mrpRouter } from '../modules/mrp/mrp.routes';
 import { reportsRouter } from '../modules/reports/reports.routes';
 import { masterDataRouter } from '../modules/masterdata/masterdata.routes';
 import { machinesRouter } from '../modules/machines/machines.routes';
@@ -26,6 +27,7 @@ apiRouter.use('/inventory', inventoryRouter);
 apiRouter.use('/production', productionRouter);
 apiRouter.use('/wip', wipRouter);
 apiRouter.use('/planning', planningRouter);
+apiRouter.use('/mrp', mrpRouter);
 apiRouter.use('/reports', reportsRouter);
 
 apiRouter.use('/master-data', masterDataRouter);

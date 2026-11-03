@@ -25,6 +25,8 @@ export const reportFiltersSchema = z
     lotNumber: z.string().trim().max(64).optional(),
     /** جستجوی آزاد (شماره لوت / شماره رگال / گواهی) */
     q: z.string().trim().max(100).optional(),
+    /** تفکیک ماتریس حساب مواد: پیش‌فرض «گرید × ضخامت»؛ «material» = ردیف به‌تفکیک کالا */
+    groupBy: z.enum(['material']).optional(),
     format: z.enum(['json', 'csv']).default('json'),
   })
   .strict();
