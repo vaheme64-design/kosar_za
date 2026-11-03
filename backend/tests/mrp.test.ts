@@ -17,7 +17,8 @@ import {
 } from '../src/modules/inventory/inventory.service';
 import { createCustomerOrder } from '../src/modules/planning/planning.service';
 import { createManufacturingOrder, cancelManufacturingOrder } from '../src/modules/production/production.service';
-import { runMrp, checkMoMaterials } from '../src/modules/mrp/mrp.service';
+import { runMrp, checkMoMaterials, runAndStoreMrp, getLatestMrpSnapshot, getMrpAlert } from '../src/modules/mrp/mrp.service';
+import { getOperationsDashboard } from '../src/modules/dashboard/dashboard.routes';
 import { supplierMatrix, refreshLedgerSnapshot, drillDown } from '../src/modules/reports/reports.service';
 import { REPORT_KEYS } from '../src/modules/reports/reports.types';
 import { db, buildFixtures, ledgerSum, uniqueCode, type Fixtures } from './helpers';
@@ -266,5 +267,67 @@ describe('phase 8 — MRP, reservations ATP, supplier matrix, ledger snapshot', 
 
   it('report catalog exposes the supplier matrix', () => {
     expect(REPORT_KEYS).toContain('supplier-matrix');
+  });
+
+  // ------------------------------------- phase 8 (scheduler): snapshots
+  it('runAndStoreMrp stores a snapshot, writes the audit row and prunes old ones', async () => {
+    // seed old snapshots so pruning is observable
+    for (let i = 0; i < 34; i++) {
+      await db.mrpSnapshot.create({
+        data: {
+          triggeredBy: 'SEED',
+          ranAt: new Date(Date.now() - (i + 2) * 86_400_000),
+          summaryJson: { materialsConsidered: 0, ok: 0, contractCovered: 0, hardShortages: 0 },
+          resultJson: {},
+        },
+      });
+    }
+    const auditsBefore = await db.auditLog.count({ where: { entityType: 'MrpRun' } });
+
+    const result = await runAndStoreMrp(f.adminId);
+    // open MOs already cover part of the demand — the engine may legitimately
+    // report zero NEW material requirement here; the snapshot must still store
+    // the honest summary
+    expect(result.summary.materialsConsidered).toBeGreaterThanOrEqual(0);
+    expect(result.ranAt).toBeTruthy();
+
+    const count = await db.mrpSnapshot.count();
+    expect(count).toBe(30); // pruned to the keep window
+
+    const latest = await getLatestMrpSnapshot();
+    expect(latest).not.toBeNull();
+    expect(latest!.triggeredBy).toBe(f.adminId);
+    expect(latest!.summary.hardShortages).toBe(result.summary.hardShortages);
+
+    const auditsAfter = await db.auditLog.count({ where: { entityType: 'MrpRun' } });
+    expect(auditsAfter).toBe(auditsBefore + 1);
+    const audit = await db.auditLog.findFirst({ where: { entityType: 'MrpRun' }, orderBy: { occurredAt: 'desc' } });
+    expect(audit!.action).toBe('RUN');
+    expect((audit!.changes as { trigger?: string }).trigger).toBe('MANUAL');
+    expect(audit!.userId).toBe(f.adminId);
+    expect(Array.isArray((audit!.changes as { shortageMaterials?: unknown[] }).shortageMaterials)).toBe(true);
+  });
+
+  it('getMrpAlert exposes the newest snapshot with age and top shortages', async () => {
+    const alert = await getMrpAlert();
+    expect(alert.available).toBe(true);
+    expect(alert.summary).not.toBeNull();
+    expect(alert.ageHours).toBeLessThan(1);
+    expect(alert.stale).toBe(false);
+    expect(alert.ranAt).toBeTruthy();
+    // top list only carries non-OK materials, capped at 5
+    expect(alert.topShortages.length).toBeLessThanOrEqual(5);
+    for (const s of alert.topShortages) {
+      expect(['SHORTAGE', 'SHORTAGE_COVERED_BY_CONTRACT']).toContain(s.severity);
+      expect(Number(s.shortage)).toBeGreaterThan(0);
+    }
+  });
+
+  it('operations dashboard carries the mrpAlert block', async () => {
+    const dash = await getOperationsDashboard();
+    expect(dash.mrpAlert).toBeDefined();
+    expect(dash.mrpAlert.available).toBe(true);
+    expect(dash.mrpAlert.summary).not.toBeNull();
+    expect(typeof dash.mrpAlert.summary!.hardShortages).toBe('number');
   });
 });

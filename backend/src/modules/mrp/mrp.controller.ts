@@ -3,10 +3,9 @@
  */
 import type { Request, Response } from 'express';
 import { z } from 'zod';
-import { runMrp, checkMoMaterials } from './mrp.service';
+import { runMrp, checkMoMaterials, runAndStoreMrp, getLatestMrpSnapshot } from './mrp.service';
 import { autoReserveForMo } from '../inventory/inventory.service';
 
-const uuidArray = z.array(z.string().uuid()).optional();
 const runMrpQuerySchema = z.object({
   partIds: z
     .string()
@@ -37,11 +36,25 @@ export async function mrpRun(req: Request, res: Response) {
   // validate uuid segments explicitly (query strings are untrusted)
   for (const id of [...(f.partIds ?? []), ...(f.orderIds ?? [])]) {
     if (!z.string().uuid().safeParse(id).success) {
-      res.status(400).json({ error: 'bad_param', message: 'Invalid id list', messageFa: 'شناسه نامعتبر است' });
+      badParam(res, 'شناسه نامعتبر است');
       return;
     }
   }
   res.json(await runMrp({ partIds: f.partIds, orderIds: f.orderIds }));
+}
+
+/** Phase 8 (scheduler) — newest stored MRP snapshot for the MRP page. */
+export async function mrpLatest(_req: Request, res: Response) {
+  res.json({ snapshot: await getLatestMrpSnapshot() });
+}
+
+/**
+ * Phase 8 (scheduler) — run the MRP calculation and store the snapshot
+ * (audited). Manual runs land in the same store the scheduler uses.
+ */
+export async function mrpRunNow(req: Request, res: Response) {
+  const user = req.user;
+  res.status(201).json(await runAndStoreMrp(user?.id ?? 'MANUAL'));
 }
 
 export async function moCheck(req: Request, res: Response) {

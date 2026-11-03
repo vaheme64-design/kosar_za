@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   RefreshCw, AlertCircle, FilePlus2, ArrowLeftRight, Factory, CalendarClock,
-  FileText, Scale, TrendingUp, Wrench, type LucideIcon,
+  FileText, Scale, TrendingUp, Wrench, ShieldAlert, type LucideIcon,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
@@ -45,6 +45,16 @@ interface OperationsDashboard {
     };
   };
   period: { from: string; to: string; basisFa: string };
+  /** phase 8 — material shortage alert from the newest stored MRP snapshot */
+  mrpAlert?: {
+    available: boolean;
+    stale: boolean;
+    ageHours: number | null;
+    ranAt: string | null;
+    summary: { materialsConsidered: number; ok: number; contractCovered: number; hardShortages: number } | null;
+    topShortages: { materialId: string; materialCode: string; materialNameFa: string; shortage: string; unitCode: string; severity: string }[];
+    reasonFa?: string;
+  };
   generatedAt: string;
   generatedAtFa: string;
 }
@@ -118,6 +128,8 @@ export function DashboardPage() {
   }
 
   const k = ops?.kpis;
+  const mrpAlert = ops?.mrpAlert;
+  const mrpShortageCount = mrpAlert?.summary ? mrpAlert.summary.hardShortages + mrpAlert.summary.contractCovered : 0;
 
   // ---- ERPNext number cards (all values from real records) ----
   const numberCards: NumberCard[] = k
@@ -163,6 +175,51 @@ export function DashboardPage() {
           <span className="dashboard__date-label">{formatJalaliDate(summary.generatedAt, false)} (جلالی)</span>
         </div>
       </div>
+
+      {/* ---- phase 8: MRP material shortage alert ---- */}
+      {mrpAlert?.available && mrpAlert.summary && mrpShortageCount > 0 && (
+        <section className={`card${mrpAlert.summary.hardShortages > 0 ? ' dashboard__mrp-alert--danger' : ' dashboard__mrp-alert--warn'}`} aria-labelledby="mrp-alert-heading">
+          <div className="card__head">
+            <h3 id="mrp-alert-heading">
+              <ShieldAlert size={16} aria-hidden style={{ verticalAlign: '-3px', marginLeft: 4 }} />
+              هشدار کسری مواد (MRP)
+            </h3>
+            <span className="card__note">
+              آخرین محاسبه: {mrpAlert.ranAt ? formatJalaliDate(mrpAlert.ranAt, true) : '—'}
+              {mrpAlert.stale ? ' — قدیمی (بیش از ۲۴ ساعت)' : ''}
+            </span>
+          </div>
+          <div className="number-cards">
+            {mrpAlert.summary.hardShortages > 0 && (
+              <Link className="number-card" to="/production-planning/mrp">
+                <div className="number-card__value">{faNumber(mrpAlert.summary.hardShortages)}</div>
+                <div className="number-card__label">کسری واقعی</div>
+                <div className="number-card__sub">بدون پوشش قرارداد — اقدام فوری</div>
+              </Link>
+            )}
+            {mrpAlert.summary.contractCovered > 0 && (
+              <Link className="number-card" to="/production-planning/mrp">
+                <div className="number-card__value">{faNumber(mrpAlert.summary.contractCovered)}</div>
+                <div className="number-card__label">کسری با پوشش قرارداد</div>
+                <div className="number-card__sub">با قرارداد باز تأمین‌کننده پوشش داده می‌شود</div>
+              </Link>
+            )}
+          </div>
+          {mrpAlert.topShortages.length > 0 && (
+            <ul className="muted" style={{ margin: '0.5rem 0 0', paddingRight: '1.2rem' }}>
+              {mrpAlert.topShortages.map((s) => (
+                <li key={s.materialId}>
+                  {s.materialCode} — {s.materialNameFa}: کسری {faNumber(Number(s.shortage))} {s.unitCode}
+                  {s.severity === 'SHORTAGE_COVERED_BY_CONTRACT' ? ' (با قرارداد باز)' : ''}
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="card__note">
+            جزئیات کامل و رزرو مواد: <Link to="/production-planning/mrp">صفحه محاسبه نیاز مواد (MRP)</Link>
+          </p>
+        </section>
+      )}
 
       {/* ---- Odoo-style quick actions ---- */}
       <section className="card" aria-labelledby="qa-heading">

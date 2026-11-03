@@ -25,6 +25,7 @@ function stripComments(src) {
 
 const DOMAINS = {
   'CONTROL — داده‌های کنترلی': ['User', 'Role', 'Permission', 'RolePermission', 'AuditLog', 'DocumentSequence', 'SystemSetting'],
+  'SNAPSHOTS — تصاویر محاسباتی': ['MrpSnapshot'],
   'MASTER DATA — اطلاعات پایه': ['UnitOfMeasure', 'Material', 'PartMaterialRequirement', 'Part', 'Customer', 'Operation', 'PartRoute', 'PartRouteStep', 'Machine', 'MachineCapability', 'Die', 'MachineDieCompatibility', 'Warehouse', 'WarehouseLocation', 'Shift'],
   'PRODUCTION DATA — داده‌های تولید': ['CustomerOrder', 'CustomerOrderLine', 'ProductionPlan', 'ProductionPlanLine', 'PlanLineOperation', 'PlanLineMaterialShortage', 'ManufacturingOrder', 'ProductionOperation', 'ProductionReport', 'ProductionScrap', 'ProductionTransfer', 'MachineAssignment'],
   'INVENTORY DATA — داده‌های انبار': ['InventoryDocument', 'InventoryDocumentLine', 'InventoryTransaction', 'InventoryReservation', 'StockBalance', 'MaterialLot', 'MaterialContract', 'MaterialContractTransaction'],

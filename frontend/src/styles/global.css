@@ -1498,3 +1498,7 @@ code {
 }
 .app-tile__label { font-size: 0.82rem; font-weight: 800; }
 .app-tile__en { font-size: 0.66rem; color: var(--text-2); direction: ltr; }
+
+/* ---- phase 8: MRP shortage alert on the main dashboard ---- */
+.dashboard__mrp-alert--danger { border-inline-start: 4px solid var(--danger, #c0392b); }
+.dashboard__mrp-alert--warn { border-inline-start: 4px solid var(--warn, #d97706); }

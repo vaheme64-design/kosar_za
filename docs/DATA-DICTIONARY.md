@@ -144,6 +144,27 @@
 
 ---
 
+## SNAPSHOTS — تصاویر محاسباتی
+
+### MrpSnapshot → `mrp_snapshots`
+
+فاز ۸ — نتیجهٔ آخرین اجرای موتور MRP (زمان‌بندی‌شده یا دستی). فقط خروجی محاسبه ذخیره می‌شود (هیچ سند عملیاتی از اینجا ساخته نمی‌شود)؛ داشبورد و هشدار کسری مواد از همین تصویر می‌خوانند تا محاسبه تکرار نشود. زمان اجرا (UTC) 'SCHEDULER' برای اجرای زمان‌بندی‌شده، یا شناسه کاربر برای اجرای دستی خلاصه (materialsConsidered / ok / contractCovered / hardShortages) نتیجه کامل اجرا (parts + materials) برای صفحه MRP
+
+| ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
+|---|---|---|---|:-:|---|---|
+| `id` | id | Uuid | String | ✓ | uuid() | PK |
+| `ran_at` | ranAt | Timestamptz(6) | DateTime | ✓ | now() |  |
+| `triggered_by` | triggeredBy | VarChar(64) | String | ✓ |  |  |
+| `summary_json` | summaryJson | Json | Json | ✓ |  |  |
+| `result_json` | resultJson | Json | Json | ✓ |  |  |
+| `created_at` | createdAt | Timestamptz(6) | DateTime | ✓ | now() |  |
+
+**ایندکس‌ها/یکتایی‌های سطح جدول:**
+
+- `@@index([ranAt])`
+
+---
+
 ## MASTER DATA — اطلاعات پایه
 
 ### UnitOfMeasure → `units_of_measure`
@@ -932,7 +953,7 @@
 
 ### InventoryTransaction → `inventory_transactions`
 
-تراکنش انبار — دفتر کل تغییرناپذیر (immutable ledger) مالکیت و وضعیت کیفی — بخشی از کلید موجودی (جداسازی ورق امانی SAPCO و قرنطینه کیفیت)
+تراکنش انبار — دفتر کل تغییرناپذیر (immutable ledger) مالکیت و وضعیت کیفی — بخشی از کلید موجودی (جداسازی ورق امانی SAPCO و قرنطینه کیفیت) reporting hot paths (phase 8) — keep in sync with migration 20261103090000
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -979,10 +1000,14 @@
 - `@@index([type])`
 - `@@index([ownership])`
 - `@@index([qualityStatus])`
+- `@@index([materialId, occurredAt])`
+- `@@index([partId, occurredAt])`
+- `@@index([warehouseId, occurredAt])`
+- `@@index([materialId, type, occurredAt])`
 
 ### InventoryReservation → `inventory_reservations`
 
-رزرو موجودی برای سفارش/دستور کار
+رزرو موجودی برای سفارش/دستور کار ATP lookups (phase 8)
 
 | ستون (DB) | فیلد (Prisma) | نوع DB | نوع Prisma | اجباری | پیش‌فرض | توضیح |
 |---|---|---|---|:-:|---|---|
@@ -1014,6 +1039,7 @@
 - `@@index([status])`
 - `@@index([forManufacturingOrderId])`
 - `@@index([forCustomerOrderLineId])`
+- `@@index([partId, materialId, status])`
 
 ### StockBalance → `stock_balances`
 
@@ -1136,6 +1162,6 @@
 
 ## آمار
 
-- تعداد مدل‌ها: **42**
-- تعداد فیلدها: **594**
+- تعداد مدل‌ها: **43**
+- تعداد فیلدها: **600**
 - دیتابیس: PostgreSQL 15+ (توسعه: 17.11)

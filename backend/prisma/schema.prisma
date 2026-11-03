@@ -1353,6 +1353,11 @@ model InventoryTransaction {
   @@index([type])
   @@index([ownership])
   @@index([qualityStatus])
+  /// reporting hot paths (phase 8) — keep in sync with migration 20261103090000
+  @@index([materialId, occurredAt])
+  @@index([partId, occurredAt])
+  @@index([warehouseId, occurredAt])
+  @@index([materialId, type, occurredAt])
   @@map("inventory_transactions")
 }
 
@@ -1386,6 +1391,8 @@ model InventoryReservation {
   @@index([status])
   @@index([forManufacturingOrderId])
   @@index([forCustomerOrderLineId])
+  /// ATP lookups (phase 8)
+  @@index([partId, materialId, status])
   @@map("inventory_reservations")
 }
 
@@ -1501,4 +1508,23 @@ model MaterialContractTransaction {
   @@index([receivedDate])
   @@index([lotId])
   @@map("material_contract_transactions")
+}
+
+/// فاز ۸ — نتیجهٔ آخرین اجرای موتور MRP (زمان‌بندی‌شده یا دستی).
+/// فقط خروجی محاسبه ذخیره می‌شود (هیچ سند عملیاتی از اینجا ساخته نمی‌شود)؛
+/// داشبورد و هشدار کسری مواد از همین تصویر می‌خوانند تا محاسبه تکرار نشود.
+model MrpSnapshot {
+  id          String   @id @default(uuid()) @db.Uuid
+  /// زمان اجرا (UTC)
+  ranAt       DateTime @default(now()) @map("ran_at") @db.Timestamptz(6)
+  /// 'SCHEDULER' برای اجرای زمان‌بندی‌شده، یا شناسه کاربر برای اجرای دستی
+  triggeredBy String   @map("triggered_by") @db.VarChar(64)
+  /// خلاصه (materialsConsidered / ok / contractCovered / hardShortages)
+  summaryJson Json     @map("summary_json")
+  /// نتیجه کامل اجرا (parts + materials) برای صفحه MRP
+  resultJson  Json     @map("result_json")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([ranAt])
+  @@map("mrp_snapshots")
 }

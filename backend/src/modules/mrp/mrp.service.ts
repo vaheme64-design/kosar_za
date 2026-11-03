@@ -23,6 +23,8 @@
 import { Prisma } from '@prisma/client';
 import { db } from '../../config/db';
 import { ApiError } from '../../lib/http';
+import { recordAudit } from '../../lib/audit';
+import { logger } from '../../lib/logger';
 import { toJalaliDateString } from '../../lib/jalali';
 import {
   computeGrossDemand,
@@ -553,4 +555,157 @@ export async function checkMoMaterials(moId: string): Promise<MoMaterialCheckRes
     readyToIssue: lines.length > 0 && lines.every((l) => l.status !== 'SHORTAGE'),
     notes: [...new Set(notes)],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 (scheduler) — stored MRP snapshots, daily run, audit trail
+// ---------------------------------------------------------------------------
+
+const MRP_SNAPSHOT_KEEP = 30;
+const MRP_STALE_HOURS = 24;
+
+export interface MrpSnapshotRow {
+  id: string;
+  ranAt: string;
+  triggeredBy: string;
+  summary: MrpRunResult['summary'];
+  result: MrpRunResult;
+}
+
+/**
+ * Run the MRP calculation and persist the result as a snapshot.
+ *
+ * The snapshot is NOT a business document — it is the stored output of a
+ * read-only calculation, used by the dashboard shortage alert and the MRP
+ * page so the heavy calculation is not repeated on every load. Each run is
+ * recorded in the audit log (append-only) with its shortage summary; old
+ * snapshots are pruned to the most recent MRP_SNAPSHOT_KEEP rows.
+ */
+export async function runAndStoreMrp(triggeredBy: string): Promise<MrpRunResult> {
+  const result = await runMrp({});
+  const snapshot = await db.mrpSnapshot.create({
+    data: {
+      triggeredBy: triggeredBy.slice(0, 64),
+      summaryJson: result.summary as unknown as Prisma.InputJsonValue,
+      resultJson: result as unknown as Prisma.InputJsonValue,
+    },
+  });
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  await recordAudit(db, {
+    // audit.userId is a UUID FK — scheduler runs have no user at all
+    userId: UUID_RE.test(triggeredBy) ? triggeredBy : null,
+    action: 'RUN',
+    entityType: 'MrpRun',
+    entityId: snapshot.id,
+    changes: {
+      trigger: triggeredBy === 'SCHEDULER' ? 'SCHEDULER' : 'MANUAL',
+      scope: result.scope,
+      summary: result.summary,
+      shortageMaterials: result.materials
+        .filter((m) => m.severity !== 'OK')
+        .map((m) => ({ materialCode: m.materialCode, severity: m.severity, shortage: m.shortageQuantity, unit: m.unitCode })),
+    },
+  });
+  // prune — keep the most recent N snapshots
+  const keep = await db.mrpSnapshot.findMany({
+    orderBy: { ranAt: 'desc' },
+    take: MRP_SNAPSHOT_KEEP,
+    select: { id: true },
+  });
+  if (keep.length === MRP_SNAPSHOT_KEEP) {
+    await db.mrpSnapshot.deleteMany({ where: { id: { notIn: keep.map((k) => k.id) } } });
+  }
+  return result;
+}
+
+/** Newest stored snapshot (or null when MRP has never run). */
+export async function getLatestMrpSnapshot(): Promise<MrpSnapshotRow | null> {
+  const row = await db.mrpSnapshot.findFirst({ orderBy: { ranAt: 'desc' } });
+  if (!row) return null;
+  return {
+    id: row.id,
+    ranAt: row.ranAt.toISOString(),
+    triggeredBy: row.triggeredBy,
+    summary: row.summaryJson as unknown as MrpRunResult['summary'],
+    result: row.resultJson as unknown as MrpRunResult,
+  };
+}
+
+/**
+ * Dashboard-facing shortage alert payload. Reads the newest snapshot and
+ * states its age honestly; when the snapshot is missing it is computed and
+ * stored once (so the first dashboard load after deployment seeds it).
+ */
+export async function getMrpAlert(): Promise<{
+  available: boolean;
+  stale: boolean;
+  ageHours: number | null;
+  ranAt: string | null;
+  summary: MrpRunResult['summary'] | null;
+  topShortages: { materialId: string; materialCode: string; materialNameFa: string; shortage: string; unitCode: string; severity: string }[];
+  reasonFa?: string;
+}> {
+  let latest = await getLatestMrpSnapshot();
+  if (!latest) {
+    await runAndStoreMrp('SCHEDULER');
+    latest = await getLatestMrpSnapshot();
+    if (!latest) return { available: false, stale: true, ageHours: null, ranAt: null, summary: null, topShortages: [], reasonFa: 'محاسبه MRP در دسترس نیست' };
+  }
+  const ageHours = (Date.now() - new Date(latest.ranAt).getTime()) / 3_600_000;
+  const stale = ageHours >= MRP_STALE_HOURS;
+  const materials = latest.result.materials ?? [];
+  const topShortages = materials
+    .filter((m) => m.severity !== 'OK')
+    .sort((a, b) => Number(b.shortageQuantity) - Number(a.shortageQuantity))
+    .slice(0, 5)
+    .map((m) => ({
+      materialId: m.materialId,
+      materialCode: m.materialCode,
+      materialNameFa: m.materialNameFa,
+      shortage: m.shortageQuantity,
+      unitCode: m.unitCode,
+      severity: m.severity,
+    }));
+  return { available: true, stale, ageHours: Math.round(ageHours * 10) / 10, ranAt: latest.ranAt, summary: latest.summary, topShortages };
+}
+
+// ---------------------------------------------------------------------------
+// In-process daily scheduler (single API process)
+// ---------------------------------------------------------------------------
+
+let schedulerTimer: ReturnType<typeof setInterval> | null = null;
+let schedulerRunning = false;
+
+/**
+ * Background MRP run — every hour, but the calculation itself executes at
+ * most once per MRP_STALE_HOURS (a daily cadence unless someone deletes the
+ * snapshots). Failures are logged and never crash the API; the in-flight
+ * flag prevents overlapping runs.
+ */
+export async function scheduledMrpTick(): Promise<void> {
+  if (schedulerRunning) return;
+  schedulerRunning = true;
+  try {
+    const latest = await getLatestMrpSnapshot();
+    const ageHours = latest ? (Date.now() - new Date(latest.ranAt).getTime()) / 3_600_000 : Infinity;
+    if (ageHours < MRP_STALE_HOURS) return;
+    const result = await runAndStoreMrp('SCHEDULER');
+    logger.info('[mrp-scheduler] snapshot stored', {
+      hardShortages: result.summary.hardShortages,
+      contractCovered: result.summary.contractCovered,
+    });
+  } catch (err) {
+    logger.error('[mrp-scheduler] run failed', { error: String(err) });
+  } finally {
+    schedulerRunning = false;
+  }
+}
+
+/** Start the hourly tick (first run shortly after boot). Idempotent. */
+export function startMrpScheduler(): void {
+  if (schedulerTimer) return;
+  schedulerTimer = setInterval(() => void scheduledMrpTick(), 60 * 60 * 1000);
+  // first run shortly after boot so the dashboard alert has data today
+  setTimeout(() => void scheduledMrpTick(), 45_000);
+  logger.info('[mrp-scheduler] started (hourly tick, snapshot at most every 24h)');
 }

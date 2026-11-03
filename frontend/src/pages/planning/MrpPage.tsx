@@ -9,9 +9,9 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Calculator, ClipboardCheck, Download, Loader2, PackageCheck, ShieldAlert } from 'lucide-react';
-import { api } from '../../lib/api';
+import { api, ApiClientError } from '../../lib/api';
 import { Page, Card, Button, Table, EmptyState, Loading, ErrorBanner, SuccessBanner, Badge, Qty, StatCardLike, fa } from '../../components/ui';
-import { faNumber } from '../../lib/jalali';
+import { faNumber, formatJalaliDate } from '../../lib/jalali';
 import { buildCsv, downloadTextFile } from '../../lib/exportImport';
 import { SubNav } from '../../components/SubNav';
 
@@ -139,6 +139,7 @@ export function MrpPage() {
   const [checking, setChecking] = useState(false);
   const [reserving, setReserving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [lastRun, setLastRun] = useState<{ ranAt: string; triggeredBy: string | null; stored: boolean } | null>(null);
 
   const loadMos = useCallback(async () => {
     try {
@@ -149,16 +150,43 @@ export function MrpPage() {
     }
   }, []);
 
+  // phase 8 (scheduler): open the page with the newest stored snapshot
+  const loadLatest = useCallback(async () => {
+    try {
+      const res = await api<{ snapshot: { ranAt: string; triggeredBy: string; result: MrpResult } | null }>('/mrp/latest');
+      if (res.snapshot) {
+        setMrp(res.snapshot.result);
+        setLastRun({ ranAt: res.snapshot.ranAt, triggeredBy: res.snapshot.triggeredBy, stored: true });
+      }
+    } catch {
+      /* no snapshot yet — the page stays on the empty state */
+    }
+  }, []);
+
   useEffect(() => {
     void loadMos();
-  }, [loadMos]);
+    void loadLatest();
+  }, [loadMos, loadLatest]);
 
   const run = async () => {
     setRunning(true);
     setError(null);
     setNotice(null);
     try {
-      setMrp(await api<MrpResult>('/mrp/run'));
+      // store the snapshot (planners); fall back to read-only calc for viewers
+      try {
+        const stored = await api<MrpResult & { ranAt: string }>('/mrp/run-now', { method: 'POST' });
+        setMrp(stored);
+        setLastRun({ ranAt: stored.ranAt, triggeredBy: 'دستی', stored: true });
+      } catch (storeErr) {
+        if (storeErr instanceof ApiClientError && storeErr.status === 403) {
+          const calc = await api<MrpResult>('/mrp/run');
+          setMrp(calc);
+          setLastRun({ ranAt: calc.ranAt, triggeredBy: null, stored: false });
+        } else {
+          throw storeErr;
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'خطا در اجرای MRP');
     } finally {
@@ -255,6 +283,14 @@ export function MrpPage() {
       >
         {!mrp && !running && <EmptyState icon={<Calculator size={28} />} title="هنوز اجرا نشده" hint="با دکمه «اجرای محاسبه» آخرین وضعیت نیاز مواد از داده‌های واقعی محاسبه می‌شود" />}
         {running && <Loading label="در حال قطع‌بوش تقاضا و مواد…" />}
+        {mrp && lastRun && (
+          <p className="muted" style={{ marginTop: '0.5rem' }}>
+            آخرین اجرا: {formatJalaliDate(lastRun.ranAt, true)}
+            {lastRun.stored
+              ? ` — ذخیره‌شده (${lastRun.triggeredBy === 'SCHEDULER' ? 'اجرای زمان‌بندی‌شده روزانه' : 'اجرای دستی'}) و مبنای هشدار کسری داشبورد`
+              : ' — فقط محاسبه (بدون ذخیره؛ مجوز اجرای ثبت‌شده ندارید)'}
+          </p>
+        )}
       </Card>
 
       {mrp && (

@@ -14,5 +14,7 @@ export const mrpRouter = Router();
 mrpRouter.use(authenticate);
 
 mrpRouter.get('/run', requirePermission('planning.view'), ctrl.mrpRun);
+mrpRouter.get('/latest', requirePermission('planning.view'), ctrl.mrpLatest);
+mrpRouter.post('/run-now', requirePermission('planning.manage'), ctrl.mrpRunNow);
 mrpRouter.get('/mos/:id/check', requirePermission('planning.view'), ctrl.moCheck);
 mrpRouter.post('/mos/:id/reserve', requirePermission('inventory.manage'), ctrl.moAutoReserve);

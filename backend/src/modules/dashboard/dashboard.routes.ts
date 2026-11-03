@@ -4,6 +4,7 @@ import { db } from '../../config/db';
 import { authenticate, requirePermission } from '../../middleware/auth';
 import { toJalaliDateString } from '../../lib/jalali';
 import { machineUtilization } from '../reports/reports.helpers';
+import { getMrpAlert } from '../mrp/mrp.service';
 
 export const dashboardRouter = Router();
 
@@ -110,6 +111,18 @@ export async function getOperationsDashboard() {
     }),
     machineUtilization({ from: periodFrom, to: now }),
   ]);
+
+  // phase 8 — material shortage alert from the newest stored MRP snapshot
+  // (computed+stored on first ever load; otherwise never blocks the request)
+  const mrpAlert = await getMrpAlert().catch(() => ({
+    available: false,
+    stale: true,
+    ageHours: null,
+    ranAt: null,
+    summary: null,
+    topShortages: [],
+    reasonFa: 'محاسبه هشدار کسری با خطا مواجه شد',
+  }));
 
   const openQty = activeOrders.reduce(
     (acc, o) => acc.plus(o.lines.reduce((a, l) => a.plus(d(l.quantity).minus(d(l.deliveredQuantity))), new D(0))),
@@ -222,6 +235,7 @@ export async function getOperationsDashboard() {
       },
     },
     period: { from: periodFrom.toISOString(), to: nowIso, basisFa: '۳۰ روز گذشته برای تولید/ضایعات واقعی' },
+    mrpAlert,
     jalaliTodayFa: toJalaliDateString(now, true),
     generatedAt: nowIso,
     generatedAtFa: `${toJalaliDateString(now, true)} — ${now.toLocaleTimeString('fa-IR')}`,
