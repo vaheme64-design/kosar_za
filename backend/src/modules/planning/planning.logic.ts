@@ -462,7 +462,7 @@ export function computeMaterialShortages(
 
     const notes: string[] = [];
     if (quarantined.comparedTo(0) > 0) notes.push(`موجودی قرنطینه‌شده (حذف‌شده): ${quarantined.toFixed(4)}`);
-    if (consignment.comparedTo(0) > 0) notes.push('شامل موجودی امانی SAPCO (به‌صورت جداگانه نمایش داده می‌شود)');
+    if (consignment.comparedTo(0) > 0) notes.push('شامل موجودی امانی تأمین‌کننده (به‌صورت جداگانه نمایش داده می‌شود)');
 
     shortages.push({
       materialId: b.materialId,

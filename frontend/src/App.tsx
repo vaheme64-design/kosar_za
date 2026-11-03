@@ -76,7 +76,7 @@ export default function App() {
           <Route path="/inventory/reservations" element={<ReservationsPage />} />
           <Route path="/inventory/lots" element={<LotsPage />} />
 
-          {/* مواد SAPCO — فاز ۲ */}
+          {/* قراردادها و مواد تأمین‌کننده — فاز ۲ */}
           <Route path="/sapco-materials" element={<SapcoMaterialsPage />} />
 
           {/* تولید و WIP — فاز ۳ */}

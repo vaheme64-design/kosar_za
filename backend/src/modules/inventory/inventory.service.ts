@@ -2,6 +2,7 @@ import { Prisma, type InventoryTxType, type StockOwnership, type QualityStatus }
 import { db } from '../../config/db';
 import { ApiError } from '../../lib/http';
 import { recordAudit } from '../../lib/audit';
+import { getSetting } from '../../lib/settings';
 import { generateDocumentNumber } from '../../services/documentNumber.service';
 import {
   createDocumentSchema,
@@ -1333,12 +1334,14 @@ export async function getLedger(filters: LedgerFilters) {
 }
 
 // ---------------------------------------------------------------------------
-// SAPCO account report (kg) + contracts
+// Supplier material account report (kg) + contracts
+// (تأمین‌کننده از تنظیمات سامانه خوانده می‌شود — قابل شخصی‌سازی)
 // ---------------------------------------------------------------------------
 
 export async function getSapcoAccount(filters: { materialId?: string; from?: string; to?: string }) {
+  const defaultSupplier = await getSetting('materials.defaultSupplierName', 'SAPCO');
   const materials = await db.material.findMany({
-    where: { ...(filters.materialId ? { id: filters.materialId } : {}), supplierName: 'SAPCO' },
+    where: { ...(filters.materialId ? { id: filters.materialId } : {}), supplierName: { equals: defaultSupplier, mode: 'insensitive' } },
     include: { baseUnit: true },
   });
 
@@ -1456,10 +1459,12 @@ export async function listContracts() {
 
 export async function createContract(input: unknown, userId: string) {
   const parsed = createContractSchema.parse(input);
+  // تأمین‌کنندهٔ پیش‌فرض از تنظیمات سامانه (قابل تغییر توسط کاربر)
+  const supplierName = parsed.supplierName?.trim() || (await getSetting('materials.defaultSupplierName', 'SAPCO'));
   const contract = await db.materialContract.create({
     data: {
       contractNumber: parsed.contractNumber,
-      supplierName: parsed.supplierName,
+      supplierName,
       materialId: parsed.materialId,
       orderDate: new Date(`${parsed.orderDate}T00:00:00Z`),
       expectedDeliveryDate: parsed.expectedDeliveryDate ? new Date(`${parsed.expectedDeliveryDate}T00:00:00Z`) : null,

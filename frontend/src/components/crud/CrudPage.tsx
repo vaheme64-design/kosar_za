@@ -5,6 +5,7 @@ import { Download, Pencil, Plus, Search, Trash2, Upload } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useAuth } from '../../context/AuthContext';
 import { downloadCsvExport, parseCsvText, readFileAsText } from '../../lib/exportImport';
+import { QuickCreateButton, type QuickCreateSpec } from '../quickcreate/QuickCreate';
 import {
   Button,
   Card,
@@ -39,6 +40,8 @@ export interface CrudField {
   wide?: boolean;
   step?: string;
   placeholder?: string;
+  /** inline quick-create (ایجاد سریع) — + button beside the select opens a modal that creates AND selects the record without closing this form */
+  quickCreate?: QuickCreateSpec;
 }
 
 export interface CrudFilter {
@@ -62,6 +65,8 @@ export interface CrudPageProps {
   extraRowAction?: (row: any) => ReactNode;
   emptyHint?: string;
   pageSizeDefault?: number;
+  /** called after an inline quick-create so parents refresh their select options */
+  reloadOptions?: () => unknown;
 }
 
 const PAGE_SIZES = [25, 50, 100, 200];
@@ -98,6 +103,7 @@ export function CrudPage({
   extraRowAction,
   emptyHint,
   pageSizeDefault = 25,
+  reloadOptions,
 }: CrudPageProps) {
   const { can } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -471,14 +477,29 @@ export function CrudPage({
                     onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
                   />
                 ) : f.type === 'select' ? (
-                  <Select value={form[f.key] ?? ''} required={f.required} onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}>
-                    <option value="">— انتخاب کنید —</option>
-                    {(f.options ?? []).map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </Select>
+                  <div className="inline-controls">
+                    <Select
+                      value={form[f.key] ?? ''}
+                      required={f.required}
+                      onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                    >
+                      <option value="">— انتخاب کنید —</option>
+                      {(f.options ?? []).map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </Select>
+                    {f.quickCreate && (
+                      <QuickCreateButton
+                        spec={f.quickCreate}
+                        onCreated={(id) => {
+                          void reloadOptions?.();
+                          if (id) setForm((prev) => ({ ...prev, [f.key]: id }));
+                        }}
+                      />
+                    )}
+                  </div>
                 ) : f.type === 'checkbox' ? (
                   <label className="checkbox-inline">
                     <input

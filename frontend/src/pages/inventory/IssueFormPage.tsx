@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { Plus, Trash2, Save, Send } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
+import { QuickCreateButton } from '../../components/quickcreate/QuickCreate';
+import { warehouseQuickCreate } from '../../lib/quickCreateSpecs';
 import { Page, Card, Field, TextInput, Select, Button, ErrorBanner, Loading, Badge, faNumber } from '../../components/ui';
 import { SubNav } from '../../components/SubNav';
 import { AiSuggestBox } from '../../components/ai/AiSuggestBox';
@@ -32,7 +34,7 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 
 export function IssueFormPage() {
   const navigate = useNavigate();
-  const { lookups, loading: lookupsLoading } = useLookups();
+  const { lookups, loading: lookupsLoading, reload } = useLookups();
 
   const [warehouseId, setWarehouseId] = useState('');
   const [documentDate, setDocumentDate] = useState(todayStr());
@@ -177,12 +179,21 @@ export function IssueFormPage() {
       <Card title="سربرگ سند">
         <div className="form-grid">
           <Field label="انبار" required>
-            <Select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
-              <option value="">— انتخاب انبار —</option>
-              {lookups.warehouses.map((w) => (
-                <option key={w.id} value={w.id}>{w.code} — {w.nameFa}</option>
-              ))}
-            </Select>
+            <div className="inline-controls">
+              <Select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+                <option value="">— انتخاب انبار —</option>
+                {lookups.warehouses.map((w) => (
+                  <option key={w.id} value={w.id}>{w.code} — {w.nameFa}</option>
+                ))}
+              </Select>
+              <QuickCreateButton
+                spec={warehouseQuickCreate()}
+                onCreated={async (id) => {
+                  await reload();
+                  if (id) setWarehouseId(id);
+                }}
+              />
+            </div>
           </Field>
           <Field label="تاریخ سند" required>
             <TextInput type="date" value={documentDate} onChange={(e) => setDocumentDate(e.target.value)} />

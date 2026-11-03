@@ -7,6 +7,9 @@ import { faNumber } from '../../lib/jalali';
 import { Page, Card, Field, TextInput, Select, Button, ErrorBanner, Loading, Badge, Modal, fa } from '../../components/ui';
 import { SubNav } from '../../components/SubNav';
 import { AiSuggestBox } from '../../components/ai/AiSuggestBox';
+import { QuickCreateButton } from '../../components/quickcreate/QuickCreate';
+import { materialQuickCreate, unitQuickCreate, warehouseQuickCreate, partQuickCreate } from '../../lib/quickCreateSpecs';
+import { useAppSettings } from '../../lib/appSettings';
 
 interface LineState {
   key: number;
@@ -29,6 +32,9 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 export function ReceiptFormPage() {
   const navigate = useNavigate();
   const { lookups, loading: lookupsLoading, reload } = useLookups();
+  const { settings } = useAppSettings();
+  // تأمین‌کنندهٔ پیش‌فرض از تنظیمات سامانه (قابل تغییر) — در کد نوشته نشده است
+  const defaultSupplier = settings['materials.defaultSupplierName'] || '';
 
   const [warehouseId, setWarehouseId] = useState('');
   const [documentDate, setDocumentDate] = useState(todayStr());
@@ -41,7 +47,7 @@ export function ReceiptFormPage() {
 
   // «قرارداد جدید (سریع)» modal — creates a contract without leaving the form
   const [contractModalFor, setContractModalFor] = useState<number | null>(null); // line key
-  const [contractForm, setContractForm] = useState({ contractNumber: '', supplierName: 'SAPCO', materialId: '', orderDate: todayStr(), totalQuantity: '', totalWeightKg: '', description: '' });
+  const [contractForm, setContractForm] = useState({ contractNumber: '', supplierName: '', materialId: '', orderDate: todayStr(), totalQuantity: '', totalWeightKg: '', description: '' });
   const [contractBusy, setContractBusy] = useState(false);
   const [contractError, setContractError] = useState<string | null>(null);
 
@@ -78,7 +84,7 @@ export function ReceiptFormPage() {
     setContractError(null);
     setContractForm({
       contractNumber: suggestContractNumber(),
-      supplierName: 'SAPCO',
+      supplierName: defaultSupplier,
       materialId: line.kind === 'MATERIAL' ? line.itemId : '',
       orderDate: todayStr(),
       totalQuantity: line.quantity || '',
@@ -100,7 +106,8 @@ export function ReceiptFormPage() {
         method: 'POST',
         body: {
           contractNumber: contractForm.contractNumber.trim(),
-          supplierName: contractForm.supplierName.trim() || 'SAPCO',
+          // خالی باشد، سرور از تأمین‌کنندهٔ پیش‌فرضِ تنظیمات سامانه استفاده می‌کند
+          ...(contractForm.supplierName.trim() ? { supplierName: contractForm.supplierName.trim() } : {}),
           materialId: contractForm.materialId,
           orderDate: contractForm.orderDate,
           totalQuantity: contractForm.totalQuantity,
@@ -198,18 +205,27 @@ export function ReceiptFormPage() {
       <Card title="سربرگ سند">
         <div className="form-grid">
           <Field label="انبار" required>
-            <Select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
-              <option value="">— انتخاب انبار —</option>
-              {lookups.warehouses.map((w) => (
-                <option key={w.id} value={w.id}>{w.code} — {w.nameFa}</option>
-              ))}
-            </Select>
+            <div className="inline-controls">
+              <Select value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+                <option value="">— انتخاب انبار —</option>
+                {lookups.warehouses.map((w) => (
+                  <option key={w.id} value={w.id}>{w.code} — {w.nameFa}</option>
+                ))}
+              </Select>
+              <QuickCreateButton
+                spec={warehouseQuickCreate()}
+                onCreated={async (id) => {
+                  await reload();
+                  if (id) setWarehouseId(id);
+                }}
+              />
+            </div>
           </Field>
           <Field label="تاریخ سند" required>
             <TextInput type="date" value={documentDate} onChange={(e) => setDocumentDate(e.target.value)} />
           </Field>
           <Field label="توضیحات">
-            <TextInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder="مثلاً رسید بار SAPCO شماره …" />
+            <TextInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder={`مثلاً رسید بار ${defaultSupplier || 'تأمین‌کننده'} شماره …`} />
           </Field>
         </div>
       </Card>
@@ -244,29 +260,54 @@ export function ReceiptFormPage() {
                   </Select>
                 </Field>
                 <Field label={l.kind === 'MATERIAL' ? 'ماده اولیه' : 'قطعه'} required>
-                  <Select value={l.itemId} onChange={(e) => {
-                    const id = e.target.value;
-                    const item = l.kind === 'MATERIAL' ? lookups.materials.find((m) => m.id === id) : lookups.parts.find((p) => p.id === id);
-                    patchLine(l.key, { itemId: id, unitId: item?.baseUnitId ?? '' });
-                  }}>
-                    <option value="">— انتخاب —</option>
-                    {(l.kind === 'MATERIAL' ? lookups.materials : lookups.parts).map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {l.kind === 'MATERIAL' ? (item as typeof lookups.materials[number]).materialCode : (item as typeof lookups.parts[number]).partNumber} — {item.nameFa}
-                      </option>
-                    ))}
-                  </Select>
+                  <div className="inline-controls">
+                    <Select value={l.itemId} onChange={(e) => {
+                      const id = e.target.value;
+                      const item = l.kind === 'MATERIAL' ? lookups.materials.find((m) => m.id === id) : lookups.parts.find((p) => p.id === id);
+                      patchLine(l.key, { itemId: id, unitId: item?.baseUnitId ?? '' });
+                    }}>
+                      <option value="">— انتخاب —</option>
+                      {(l.kind === 'MATERIAL' ? lookups.materials : lookups.parts).map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {l.kind === 'MATERIAL' ? (item as typeof lookups.materials[number]).materialCode : (item as typeof lookups.parts[number]).partNumber} — {item.nameFa}
+                        </option>
+                      ))}
+                    </Select>
+                    <QuickCreateButton
+                      spec={l.kind === 'MATERIAL' ? materialQuickCreate(lookups, settings) : partQuickCreate(lookups)}
+                      onCreated={async (id) => {
+                        const fresh = await reload();
+                        if (!id) return;
+                        if (l.kind === 'MATERIAL') {
+                          const m = fresh?.materials.find((x) => x.id === id);
+                          patchLine(l.key, { itemId: id, unitId: m?.baseUnitId ?? l.unitId });
+                        } else {
+                          const p = fresh?.parts.find((x) => x.id === id);
+                          patchLine(l.key, { itemId: id, unitId: p?.baseUnitId ?? l.unitId });
+                        }
+                      }}
+                    />
+                  </div>
                 </Field>
                 <Field label="مقدار" required>
                   <TextInput type="number" min="0" step="0.001" value={l.quantity} onChange={(e) => patchLine(l.key, { quantity: e.target.value })} />
                 </Field>
                 <Field label="واحد" hint="پیش‌فرض: واحد پایه قلم">
-                  <Select value={l.unitId} onChange={(e) => patchLine(l.key, { unitId: e.target.value })}>
-                    <option value="">— واحد پایه —</option>
-                    {lookups.units.map((u) => (
-                      <option key={u.id} value={u.id}>{u.nameFa} ({u.code})</option>
-                    ))}
-                  </Select>
+                  <div className="inline-controls">
+                    <Select value={l.unitId} onChange={(e) => patchLine(l.key, { unitId: e.target.value })}>
+                      <option value="">— واحد پایه —</option>
+                      {lookups.units.map((u) => (
+                        <option key={u.id} value={u.id}>{u.nameFa} ({u.code})</option>
+                      ))}
+                    </Select>
+                    <QuickCreateButton
+                      spec={unitQuickCreate()}
+                      onCreated={async (id) => {
+                        await reload();
+                        if (id) patchLine(l.key, { unitId: id });
+                      }}
+                    />
+                  </div>
                 </Field>
                 {l.kind === 'MATERIAL' && (
                   <>
@@ -290,7 +331,7 @@ export function ReceiptFormPage() {
                         )}
                       </div>
                     </Field>
-                    <Field label="قرارداد SAPCO" hint="با انتخاب قرارداد، ورق به‌صورت امانی ثبت می‌شود — اگر قرارداد ندارید همین‌جا بسازید">
+                    <Field label="قرارداد تأمین‌کننده" hint="با انتخاب قرارداد، ورق به‌صورت امانی ثبت می‌شود — اگر قرارداد ندارید همین‌جا بسازید">
                       <div className="inline-controls">
                         <Select value={l.contractId} onChange={(e) => patchLine(l.key, { contractId: e.target.value, ownership: e.target.value ? 'SUPPLIER_CONSIGNMENT' : l.ownership })}>
                           <option value="">— بدون قرارداد —</option>
@@ -378,16 +419,25 @@ export function ReceiptFormPage() {
             <Field label="شماره قرارداد" required hint="شماره پیشنهادی را می‌توانید تغییر دهید">
               <TextInput dir="ltr" value={contractForm.contractNumber} onChange={(e) => setContractForm((f) => ({ ...f, contractNumber: e.target.value }))} />
             </Field>
-            <Field label="تأمین‌کننده" hint="پیش‌فرض: SAPCO">
-              <TextInput value={contractForm.supplierName} onChange={(e) => setContractForm((f) => ({ ...f, supplierName: e.target.value }))} />
+            <Field label="تأمین‌کننده" hint={`پیش‌فرض سامانه: ${defaultSupplier || 'تنظیم نشده'} — قابل تغییر`}>
+              <TextInput value={contractForm.supplierName} onChange={(e) => setContractForm((f) => ({ ...f, supplierName: e.target.value }))} placeholder={defaultSupplier} />
             </Field>
             <Field label="ماده اولیه" required>
-              <Select value={contractForm.materialId} onChange={(e) => setContractForm((f) => ({ ...f, materialId: e.target.value }))}>
-                <option value="">— انتخاب ماده —</option>
-                {lookups.materials.map((m) => (
-                  <option key={m.id} value={m.id}>{m.materialCode} — {m.nameFa}</option>
-                ))}
-              </Select>
+              <div className="inline-controls">
+                <Select value={contractForm.materialId} onChange={(e) => setContractForm((f) => ({ ...f, materialId: e.target.value }))}>
+                  <option value="">— انتخاب ماده —</option>
+                  {lookups.materials.map((m) => (
+                    <option key={m.id} value={m.id}>{m.materialCode} — {m.nameFa}</option>
+                  ))}
+                </Select>
+                <QuickCreateButton
+                  spec={materialQuickCreate(lookups, settings)}
+                  onCreated={async (id) => {
+                    await reload();
+                    if (id) setContractForm((f) => ({ ...f, materialId: id }));
+                  }}
+                />
+              </div>
             </Field>
             <Field label="تاریخ قرارداد" required>
               <TextInput type="date" value={contractForm.orderDate} onChange={(e) => setContractForm((f) => ({ ...f, orderDate: e.target.value }))} />

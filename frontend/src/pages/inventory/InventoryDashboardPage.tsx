@@ -74,7 +74,7 @@ export function InventoryDashboardPage() {
           <div className="stat-grid stat-grid--wide">
             <StatCardLike icon={<Boxes size={20} />} value={faNumber(data.itemsInStock)} label="قلم دارای موجودی" tone="primary" />
             <StatCardLike icon={<Truck size={20} />} value={`${faNumber(Math.round(Number(data.stockKg.owned)))} kg`} label="موجودی مالی (کیلوگرم)" tone="ok" />
-            <StatCardLike icon={<Truck size={20} />} value={`${faNumber(Math.round(Number(data.stockKg.supplierConsignment)))} kg`} label="موجودی امانی SAPCO (کیلوگرم)" tone="info" />
+            <StatCardLike icon={<Truck size={20} />} value={`${faNumber(Math.round(Number(data.stockKg.supplierConsignment)))} kg`} label="موجودی امانی تأمین‌کننده (کیلوگرم)" tone="info" />
             <StatCardLike icon={<FileText size={20} />} value={faNumber(data.documents.draft)} label="سند در پیش‌نویس" tone="warn" />
             <StatCardLike icon={<Lock size={20} />} value={faNumber(data.qualityBlockedRows)} label="ردیف مسدود کیفیت" tone="danger" />
             <StatCardLike icon={<FilePlus2 size={20} />} value={faNumber(data.activeReservations)} label="رزرو فعال" tone="muted" />
@@ -88,7 +88,7 @@ export function InventoryDashboardPage() {
               <Link className="quick-link" to="/inventory/adjustments/new"><Scale size={18} /> اصلاحیه انبار</Link>
               <Link className="quick-link" to="/inventory/inquiry"><Search size={18} /> استعلام موجودی</Link>
               <Link className="quick-link" to="/inventory/movements"><History size={18} /> دفتر کل حرکت</Link>
-              <Link className="quick-link" to="/sapco-materials"><Truck size={18} /> گزارش حساب SAPCO</Link>
+              <Link className="quick-link" to="/sapco-materials"><Truck size={18} /> حساب مواد تأمین‌کننده</Link>
             </div>
           </Card>
 

@@ -20,6 +20,8 @@ import {
   TextInput,
 } from '../../components/ui';
 import { faEx } from '../../lib/labels';
+import { QuickCreateButton } from '../../components/quickcreate/QuickCreate';
+import { partQuickCreate, dieQuickCreate } from '../../lib/quickCreateSpecs';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -60,7 +62,7 @@ const emptyStep: RouteStep = { sequence: 0, operationId: '', machineId: '', dieI
  */
 export function RoutesPage() {
   const { can } = useAuth();
-  const { lookups } = useLookups();
+  const { lookups, reload } = useLookups();
   const canManage = can('masterdata.manage');
 
   const [rows, setRows] = useState<RouteRow[]>([]);
@@ -352,14 +354,23 @@ export function RoutesPage() {
         <Modal title={editingId ? 'ویرایش مسیر تولید' : 'مسیر تولید جدید'} onClose={() => setEditorOpen(false)} wide>
           <div className="form-grid">
             <Field label="قطعه" required>
-              <Select value={head.partId} disabled={Boolean(editingId)} onChange={(e) => setHead((h) => ({ ...h, partId: e.target.value }))}>
-                <option value="">— انتخاب قطعه —</option>
-                {partOptions.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </Select>
+              <div className="inline-controls">
+                <Select value={head.partId} disabled={Boolean(editingId)} onChange={(e) => setHead((h) => ({ ...h, partId: e.target.value }))}>
+                  <option value="">— انتخاب قطعه —</option>
+                  {partOptions.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </Select>
+                <QuickCreateButton
+                  spec={partQuickCreate(lookups)}
+                  onCreated={async (id) => {
+                    await reload();
+                    if (id) setHead((h) => ({ ...h, partId: id }));
+                  }}
+                />
+              </div>
             </Field>
             <Field label="نام مسیر">
               <TextInput value={head.name} onChange={(e) => setHead((h) => ({ ...h, name: e.target.value }))} placeholder="مثلاً مسیر یراق درب" />
@@ -396,14 +407,23 @@ export function RoutesPage() {
                     </Select>
                   </Field>
                   <Field label="قالب">
-                    <Select value={s.dieId ?? ''} onChange={(e) => setStep(idx, { dieId: e.target.value })}>
-                      <option value="">— بدون قالب —</option>
-                      {dieOptions.map((o: any) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </Select>
+                    <div className="inline-controls">
+                      <Select value={s.dieId ?? ''} onChange={(e) => setStep(idx, { dieId: e.target.value })}>
+                        <option value="">— بدون قالب —</option>
+                        {dieOptions.map((o: any) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </Select>
+                      <QuickCreateButton
+                        spec={dieQuickCreate()}
+                        onCreated={async (id) => {
+                          await reload();
+                          if (id) setStep(idx, { dieId: id });
+                        }}
+                      />
+                    </div>
                   </Field>
                   <Field label="دوره ضایعات ٪">
                     <TextInput

@@ -772,7 +772,7 @@ export async function sapcoAccount(f: { from?: string; to?: string; materialId?:
     { key: 'adjustmentsKg', labelFa: 'تعدیلات دوره', kind: 'ACTUAL', unit: 'kg' },
     { key: 'closingKg', labelFa: 'پایانی دوره', kind: 'INFO', unit: 'kg' },
     { key: 'balanceOwnedKg', labelFa: 'موجودی فعلی مالی', kind: 'ACTUAL', unit: 'kg' },
-    { key: 'balanceConsignmentKg', labelFa: 'موجودی فعلی امانی SAPCO', kind: 'ACTUAL', unit: 'kg' },
+    { key: 'balanceConsignmentKg', labelFa: 'موجودی فعلی امانی تأمین‌کننده', kind: 'ACTUAL', unit: 'kg' },
     { key: 'closingMatchesLedger', labelFa: 'تطبیق با دفتر کل', kind: 'INFO' },
     { key: 'openContractRemainingKg', labelFa: 'باقی‌مانده قراردادهای باز', kind: 'PLANNED', unit: 'kg' },
     { key: 'hasMovements', labelFa: 'گردش دارد؟', kind: 'INFO' },
@@ -783,11 +783,11 @@ export async function sapcoAccount(f: { from?: string; to?: string; materialId?:
   const notes = [
     'همه ارقام کیلوگرمی و از دفتر کل تراکنش‌های قطع‌بوش‌شده است؛ افتتاحیه = جمع دفتر کل قبل از ابتدای دوره.',
     'ستون «پایانی دوره» = افتتاحیه + دریافتی − مصرف + تعدیلات و با جمع دفتر کل تا پایان دوره تطبیق داده می‌شود.',
-    'موجودی امانی (SUPPLIER_CONSIGNMENT) جدا از موجودی مالی نشان داده می‌شود (الزام SAPCO).',
+    'موجودی امانی (SUPPLIER_CONSIGNMENT) جدا از موجودی مالی نشان داده می‌شود (الزام تأمین‌کننده خارجی).',
   ];
   if (defaultApplied) notes.push('بازه پیش‌فرض: ۳۰ روز گذشته (بدون فیلتر تاریخ از سوی کاربر)؛ افتتاحیه همچنان کل سابقه قبل از ابتدای دوره را در بر می‌گیرد.');
 
-  return table('sapco-account', 'حساب مواد SAPCO (کیلوگرمی)', columns, rows, meta(f, notes, defaultApplied ? { from: isoDate(period.from!), to: isoDate(period.to!), basisFa: '۳۰ روز گذشته' } : undefined));
+  return table('sapco-account', 'حساب مواد تأمین‌کننده (کیلوگرمی)', columns, rows, meta(f, notes, defaultApplied ? { from: isoDate(period.from!), to: isoDate(period.to!), basisFa: '۳۰ روز گذشته' } : undefined));
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,7 +1508,7 @@ export async function drillDown(kind: string, id: string, f: { from?: string; to
         { key: 'weightKg', labelFa: 'وزن', kind: 'ACTUAL', unit: 'kg' },
         { key: 'note', labelFa: 'لوت', kind: 'IDENTIFIER' },
       ], rows, f, [
-        { labelFa: 'صفحه مواد SAPCO', href: '/sapco-materials' },
+        { labelFa: 'صفحه مواد تأمین‌کننده', href: '/sapco-materials' },
       ]);
     }
 
@@ -1861,7 +1861,7 @@ export async function coilInventory(f: ReportFilters): Promise<ReportTable> {
       weightRemainingKg: fmt(remaining, 3),
       consumedKg: fmt(consumed, 3),
       consumptionPct: received.comparedTo(0) > 0 ? `${consumed.div(received).mul(100).toFixed(1)}٪` : '—',
-      ownership: l.ownership === 'SUPPLIER_CONSIGNMENT' ? 'امانی (SAPCO)' : 'مالی خود',
+      ownership: l.ownership === 'SUPPLIER_CONSIGNMENT' ? 'امانی تأمین‌کننده' : 'مالی خود',
       contract: l.contractNumbers.join('، ') || '',
       location: l.locations.map((x) => `${x.warehouseCode}${x.locationCode ? ` / ${x.locationCode}` : ''}`).join('، '),
     };

@@ -3,6 +3,7 @@ import { Truck, RefreshCw } from 'lucide-react';
 import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
 import { Page, Card, Field, Select, TextInput, Button, Table, EmptyState, Loading, ErrorBanner, Badge, Qty, fa } from '../../components/ui';
+import { useAppSettings } from '../../lib/appSettings';
 
 interface AccountRow {
   materialId: string;
@@ -43,6 +44,9 @@ interface ContractRow {
 
 export function SapcoMaterialsPage() {
   const { lookups } = useLookups();
+  // نام تأمین‌کننده از تنظیمات سامانه خوانده می‌شود — در کد نوشته نشده است
+  const { settings } = useAppSettings();
+  const defaultSupplier = settings['materials.defaultSupplierName'];
   const [materialId, setMaterialId] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -66,7 +70,7 @@ export function SapcoMaterialsPage() {
       setAccount(acc.account);
       setContracts(con.contracts);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'خطا در دریافت گزارش SAPCO');
+      setError(err instanceof Error ? err.message : 'خطا در دریافت گزارش حساب مواد تأمین‌کننده');
     } finally {
       setLoading(false);
     }
@@ -78,17 +82,19 @@ export function SapcoMaterialsPage() {
 
   return (
     <Page
-      title="گزارش حساب مواد SAPCO"
-      subtitle="افتتاحیه، دریافت، مصرف و پایان دوره به کیلوگرم — جداسازی ورق امانی تأمین‌کننده و دفتر کل قراردادها"
+      title="گزارش حساب مواد تأمین‌کننده"
+      subtitle={`افتتاحیه، دریافت، مصرف و پایان دوره به کیلوگرم برای مواد تأمین‌کنندهٔ «${defaultSupplier || '…'}» — تفکیک امانی/مالی و دفتر کل قراردادها (تأمین‌کنندهٔ پیش‌فرض از تنظیمات سامانه)`}
     >
       <Card title="دوره گزارش">
         <div className="form-grid">
           <Field label="ماده اولیه">
             <Select value={materialId} onChange={(e) => setMaterialId(e.target.value)}>
-              <option value="">— همه مواد SAPCO —</option>
-              {lookups.materials.filter((m) => m.supplierName === 'SAPCO').map((m) => (
-                <option key={m.id} value={m.id}>{m.materialCode} — {m.nameFa}</option>
-              ))}
+              <option value="">— همه مواد تأمین‌کننده ({defaultSupplier || 'همه'}) —</option>
+              {lookups.materials
+                .filter((m) => !defaultSupplier || m.supplierName.toLowerCase() === defaultSupplier.toLowerCase())
+                .map((m) => (
+                  <option key={m.id} value={m.id}>{m.materialCode} — {m.nameFa}</option>
+                ))}
             </Select>
           </Field>
           <Field label="از تاریخ">
@@ -109,7 +115,7 @@ export function SapcoMaterialsPage() {
       {loading && <Loading />}
 
       {!loading && account.length === 0 && (
-        <EmptyState icon={<Truck size={28} />} title="ماده اولیه SAPCO یافت نشد" />
+        <EmptyState icon={<Truck size={28} />} title={"ماده اولیه‌ای برای تأمین‌کنندهٔ پیش‌فرض یافت نشد"} hint={"نام تأمین‌کننده را در تنظیمات سامانه (materials.defaultSupplierName) یا تأمین‌کنندهٔ مواد در اطلاعات پایه بررسی کنید"} />
       )}
 
       {account.length > 0 && (

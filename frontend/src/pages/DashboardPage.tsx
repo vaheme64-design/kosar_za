@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, Package, Cog, Warehouse, Users, Wrench, AlertCircle, ClipboardList, Factory, TrendingUp, AlarmClock, PackageX, Layers, Boxes, Trash2, Gauge } from 'lucide-react';
+import {
+  RefreshCw, AlertCircle, FilePlus2, ArrowLeftRight, Factory, CalendarClock,
+  FileText, Scale, TrendingUp, Wrench, type LucideIcon,
+} from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { faNumber, formatJalaliDate } from '../lib/jalali';
 import { MODULES } from '../config/modules';
 import { Badge } from '../components/ui';
+import { useAuth } from '../context/AuthContext';
+import { useAppSettings } from '../lib/appSettings';
 
 interface DashboardSummary {
   stats: {
@@ -44,7 +49,23 @@ interface OperationsDashboard {
   generatedAtFa: string;
 }
 
+interface NumberCard {
+  label: string;
+  value: string;
+  sub: string;
+  to: string;
+  tone: 'primary' | 'ok' | 'warn' | 'danger' | 'info' | 'muted';
+}
+
+/**
+ * Home dashboard — Odoo/ERPNext-style:
+ * ۱) نوار خوش‌آمد با تاریخ جلالی  ۲) اقدامات سریع (ورود مستقیم به فرم‌ها)
+ * ۳) کارت‌های عددی ERPNext (همه از رکوردهای واقعی دیتابیس)  ۴) شبکه ماژول‌ها (Odoo apps)
+ * هیچ عدد ساختگی وجود ندارد؛ تخمینی‌ها با برچسب «تخمینی» مشخص‌اند.
+ */
 export function DashboardPage() {
+  const { can } = useAuth();
+  const { settings } = useAppSettings();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [ops, setOps] = useState<OperationsDashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -96,23 +117,45 @@ export function DashboardPage() {
     );
   }
 
-  const statCards = [
-    { icon: Package, label: 'قطعات فعال', value: summary.stats.activeParts, hint: 'مستری قطعات' },
-    { icon: Cog, label: 'ماشین‌آلات فعال', value: summary.stats.activeMachines, hint: 'پرس، برش، جوش، رنگ' },
-    { icon: Warehouse, label: 'انبارهای فعال', value: summary.stats.warehouses, hint: 'مواد، WIP، تکمیلی، ضایعات' },
-    { icon: Users, label: 'کاربران فعال', value: summary.stats.activeUsers, hint: 'کاربران سامانه' },
+  const k = ops?.kpis;
+
+  // ---- ERPNext number cards (all values from real records) ----
+  const numberCards: NumberCard[] = k
+    ? [
+        { label: 'سفارش‌های فعال مشتری', value: faNumber(k.activeCustomerOrders.count), sub: `مقدار باز: ${faNumber(Number(k.activeCustomerOrders.openQuantity))}`, to: '/production-planning', tone: 'primary' },
+        { label: 'تولید واقعی (۳۰ روز)', value: faNumber(Number(k.actualProduction.quantity)), sub: 'گزارش‌های قطع‌بوش‌شده', to: '/reports/plan-vs-actual', tone: 'ok' },
+        { label: 'قطعات در جریان ساخت', value: faNumber(Number(k.wipQuantity.quantity)), sub: 'WIP دستور کارهای فعال', to: '/wip', tone: 'info' },
+        { label: 'موجودی محصول تکمیلی', value: faNumber(Number(k.finishedGoodsStock.owned)), sub: `امانی: ${faNumber(Number(k.finishedGoodsStock.consignment))}`, to: '/inventory/inquiry', tone: 'ok' },
+        { label: 'سفارش‌های عقب‌افتاده', value: faNumber(k.delayedOrders.lineCount), sub: 'ردیف با سررسید گذشته', to: '/reports/order-fulfillment', tone: k.delayedOrders.lineCount > 0 ? 'danger' : 'muted' },
+        { label: 'کسری مواد', value: faNumber(k.materialShortages.count), sub: k.materialShortages.sourcePlanNumber ? `آخرین اجرا: ${k.materialShortages.sourcePlanNumber}` : 'برنامه‌ای اجرا نشده', to: '/production-planning', tone: k.materialShortages.count > 0 ? 'warn' : 'muted' },
+        { label: 'ضایعات (۳۰ روز)', value: faNumber(Number(k.scrap.quantity)), sub: 'از گزارش‌های تولید', to: '/reports/scrap', tone: 'muted' },
+        { label: 'بهره‌وری ماشین‌آلات', value: k.machineUtilization.averagePct === null ? '—' : `${faNumber(k.machineUtilization.averagePct)}٪`, sub: 'تخمینی — بر پایه زمان استاندارد', to: '/reports/machine-workload', tone: 'muted' },
+      ]
+    : [];
+
+  // ---- Odoo quick actions (permission-aware, no fake routes) ----
+  const actions: { to: string; label: string; icon: LucideIcon; permission: string; primary?: boolean }[] = [
+    { to: '/inventory/receipts/new', label: 'رسید انبار', icon: FilePlus2, permission: 'inventory.manage', primary: true },
+    { to: '/inventory/issues/new', label: 'حواله مصرف', icon: FileText, permission: 'inventory.manage' },
+    { to: '/inventory/transfers/new', label: 'انتقال انبار', icon: ArrowLeftRight, permission: 'inventory.manage' },
+    { to: '/inventory/adjustments/new', label: 'اصلاحیه انبار', icon: Scale, permission: 'inventory.manage' },
+    { to: '/production', label: 'دستور کار جدید', icon: Factory, permission: 'production.manage' },
+    { to: '/production/reports/new', label: 'گزارش تولید', icon: FileText, permission: 'production.manage' },
+    { to: '/production-planning', label: 'سفارش مشتری / اجرای برنامه', icon: CalendarClock, permission: 'planning.manage' },
+    { to: '/reports', label: 'گزارش‌های مدیریتی', icon: TrendingUp, permission: 'reports.view' },
   ];
+
+  const factoryName = settings['factory.name'] || 'KPIMS';
 
   return (
     <div className="dashboard">
+      {/* ---- welcome strip ---- */}
       <div className="dashboard__welcome card">
         <div>
-          <h2>به KPIMS خوش آمدید</h2>
+          <h2>{factoryName}</h2>
           <p>
-            اسکلت سامانه (فاز صفر)، طرح دیتابیس (فاز یک)، انبار (فاز ۲)، تولید و WIP (فاز ۳)، برنامه‌ریزی
-            (فاز ۴)، گزارش‌های مدیریتی (فاز ۵) و تکمیل اطلاعات پایه، ماشین‌آلات، تنظیمات + جستجوی
-            سراسری و ورود/خروجی اکسل (فاز ۶) پیاده‌سازی شده است. شمارنده‌ها مستقیماً از PostgreSQL
-            خوانده می‌شود.
+            سامانه مدیریت تولید و موجودی — همه شمارنده‌ها مستقیماً از PostgreSQL خوانده می‌شود.
+            برای جستجوی سریع در همه بخش‌ها <b>Ctrl+K</b> را بزنید.
           </p>
         </div>
         <div className="dashboard__date" dir="ltr">
@@ -121,105 +164,146 @@ export function DashboardPage() {
         </div>
       </div>
 
-      <div className="stat-grid">
-        {statCards.map((s) => (
-          <div key={s.label} className="card stat-card">
-            <div className="stat-card__icon" aria-hidden>
-              <s.icon size={22} />
-            </div>
-            <div>
-              <div className="stat-card__value">{faNumber(s.value)}</div>
-              <div className="stat-card__label">{s.label}</div>
-              <div className="stat-card__hint">{s.hint}</div>
-            </div>
-          </div>
-        ))}
-      </div>
+      {/* ---- Odoo-style quick actions ---- */}
+      <section className="card" aria-labelledby="qa-heading">
+        <div className="card__head">
+          <h3 id="qa-heading">اقدامات سریع</h3>
+          <span className="card__note">ورود مستقیم به فرم‌ها — بدون بستن صفحه فعلی</span>
+        </div>
+        <div className="quick-actions">
+          {actions
+            .filter((a) => can(a.permission))
+            .map((a) => (
+              <Link key={a.to + a.label} className={`quick-action${a.primary ? ' quick-action--primary' : ''}`} to={a.to}>
+                <a.icon size={16} aria-hidden /> {a.label}
+              </Link>
+            ))}
+        </div>
+      </section>
 
-      {/* ---- فاز ۵: مؤلفه‌های عملیاتی (رکوردهای واقعی دیتابیس) ---- */}
-      {ops && (
-        <section className="card kpi-section" aria-labelledby="ops-kpi-heading">
+      {/* ---- ERPNext number cards ---- */}
+      {k && (
+        <section className="card" aria-labelledby="nc-heading">
           <div className="card__head">
-            <h3 id="ops-kpi-heading">مؤلفه‌های عملیاتی</h3>
+            <h3 id="nc-heading">نمای عملیاتی</h3>
             <span className="card__note">
-              زمان تولید: {ops.generatedAtFa} — {ops.period.basisFa}
+              {ops!.generatedAtFa} — {ops!.period.basisFa}
             </span>
           </div>
+          <div className="number-cards">
+            {numberCards.map((c) => (
+              <Link key={c.label} className="number-card" to={c.to}>
+                <div className="number-card__value">{c.value}</div>
+                <div className="number-card__label">{c.label}</div>
+                <div className="number-card__sub">{c.sub}</div>
+              </Link>
+            ))}
+          </div>
+          <p className="kpi-note">
+            <Wrench size={13} aria-hidden /> {k.machineUtilization.noteFa} — تفکیک «تخمینی/برنامه‌ای/واقعی» حفظ شده است.
+          </p>
+        </section>
+      )}
+
+      {/* ---- Odoo apps grid ---- */}
+      <section className="card" aria-labelledby="apps-heading">
+        <div className="card__head">
+          <h3 id="apps-heading">ماژول‌ها</h3>
+          <button className="btn btn--ghost btn--sm" onClick={() => void load()}>
+            <RefreshCw size={14} aria-hidden /> به‌روزرسانی
+          </button>
+        </div>
+        <div className="apps-grid">
+          {MODULES.map((m) => (
+            <Link key={m.key} className="app-tile" to={m.path} title={m.descriptionFa}>
+              <span className="app-tile__icon" aria-hidden>
+                <m.icon size={22} />
+              </span>
+              <span className="app-tile__label">{m.titleFa}</span>
+              <span className="app-tile__en">{m.titleEn}</span>
+            </Link>
+          ))}
+        </div>
+        <p className="card__note">
+          مستری‌ها (قطعه، ماده، انبار، واحد، مشتری، شیفت…) همه قابل ویرایش‌اند؛ پیش‌فرض‌ها (مانند نام تأمین‌کننده) از
+          «تنظیمات سامانه» خوانده می‌شود و هر زمان قابل تغییر است.
+        </p>
+      </section>
+
+      {/* ---- master data counters ---- */}
+      <section className="card" aria-labelledby="md-heading">
+        <div className="card__head">
+          <h3 id="md-heading">اطلاعات پایه</h3>
+          <Link className="see-all" to="/master-data">
+            مدیریت اطلاعات پایه
+          </Link>
+        </div>
+        <div className="number-cards">
+          <Link className="number-card" to="/master-data/parts">
+            <div className="number-card__value">{faNumber(summary.stats.activeParts)}</div>
+            <div className="number-card__label">قطعات فعال</div>
+          </Link>
+          <Link className="number-card" to="/machines">
+            <div className="number-card__value">{faNumber(summary.stats.activeMachines)}</div>
+            <div className="number-card__label">ماشین‌آلات فعال</div>
+          </Link>
+          <Link className="number-card" to="/master-data/warehouses">
+            <div className="number-card__value">{faNumber(summary.stats.warehouses)}</div>
+            <div className="number-card__label">انبارهای فعال</div>
+          </Link>
+          <Link className="number-card" to="/master-data/operations">
+            <div className="number-card__value">{faNumber(summary.stats.operations)}</div>
+            <div className="number-card__label">عملیات تعریف‌شده</div>
+          </Link>
+          <Link className="number-card" to="/master-data/customers">
+            <div className="number-card__value">{faNumber(summary.stats.customers)}</div>
+            <div className="number-card__label">مشتریان فعال</div>
+          </Link>
+          <Link className="number-card" to="/master-data/units">
+            <div className="number-card__value">{faNumber(summary.stats.units)}</div>
+            <div className="number-card__label">واحدهای شمارش</div>
+          </Link>
+          <Link className="number-card" to="/settings/users">
+            <div className="number-card__value">{faNumber(summary.stats.activeUsers)}</div>
+            <div className="number-card__label">کاربران فعال</div>
+          </Link>
+        </div>
+      </section>
+
+      {k && (
+        <section className="card" aria-labelledby="ops-detail-heading">
+          <div className="card__head">
+            <h3 id="ops-detail-heading">جزئیات شاخص‌ها</h3>
+          </div>
           <div className="kpi-grid">
-            <div className="kpi-tile">
-              <div className="kpi-tile__head">
-                <span className="kpi-tile__label">سفارش‌های فعال مشتری</span>
-                <Badge tone="ok">واقعی</Badge>
-              </div>
-              <div className="kpi-tile__value">{faNumber(ops.kpis.activeCustomerOrders.count)}</div>
-              <div className="kpi-tile__sub">مقدار باز: {faNumber(Number(ops.kpis.activeCustomerOrders.openQuantity))}</div>
-            </div>
             <div className="kpi-tile">
               <div className="kpi-tile__head">
                 <span className="kpi-tile__label">تولید برنامه‌ای</span>
                 <Badge tone="info">برنامه‌ای</Badge>
               </div>
-              <div className="kpi-tile__value">{faNumber(Number(ops.kpis.plannedProduction.quantity))}</div>
-              <div className="kpi-tile__sub">{faNumber(ops.kpis.plannedProduction.planCount)} برنامه تأییدشده/آزادشده</div>
-            </div>
-            <div className="kpi-tile">
-              <div className="kpi-tile__head">
-                <span className="kpi-tile__label">تولید واقعی (۳۰ روز)</span>
-                <Badge tone="ok">واقعی</Badge>
-              </div>
-              <div className="kpi-tile__value">{faNumber(Number(ops.kpis.actualProduction.quantity))}</div>
-              <div className="kpi-tile__sub">گزارش‌های تولید قطع‌بوش‌شده</div>
+              <div className="kpi-tile__value">{faNumber(Number(k.plannedProduction.quantity))}</div>
+              <div className="kpi-tile__sub">{faNumber(k.plannedProduction.planCount)} برنامه تأییدشده/آزادشده</div>
             </div>
             <div className="kpi-tile">
               <div className="kpi-tile__head">
                 <span className="kpi-tile__label">سفارش‌های عقب‌افتاده</span>
-                <Badge tone={ops.kpis.delayedOrders.lineCount > 0 ? 'danger' : 'muted'}>
-                  {faNumber(ops.kpis.delayedOrders.lineCount)}
-                </Badge>
+                <Badge tone={k.delayedOrders.lineCount > 0 ? 'danger' : 'muted'}>{faNumber(k.delayedOrders.lineCount)}</Badge>
               </div>
-              <div className="kpi-tile__value">{faNumber(Number(ops.kpis.delayedOrders.openQuantity))}</div>
+              <div className="kpi-tile__value">{faNumber(Number(k.delayedOrders.openQuantity))}</div>
               <div className="kpi-tile__sub">مقدار باز با سررسید گذشته</div>
             </div>
             <div className="kpi-tile">
               <div className="kpi-tile__head">
                 <span className="kpi-tile__label">کسری مواد</span>
-                <Badge tone={ops.kpis.materialShortages.count > 0 ? 'warn' : 'muted'}>
-                  {faNumber(ops.kpis.materialShortages.count)}
-                </Badge>
+                <Badge tone={k.materialShortages.count > 0 ? 'warn' : 'muted'}>{faNumber(k.materialShortages.count)}</Badge>
               </div>
-              <div className="kpi-tile__value">{faNumber(Number(ops.kpis.materialShortages.quantity))}</div>
+              <div className="kpi-tile__value">{faNumber(Number(k.materialShortages.quantity))}</div>
               <div className="kpi-tile__sub">
-                {ops.kpis.materialShortages.sourcePlanNumber
-                  ? `آخرین اجرای برنامه‌ریزی: ${ops.kpis.materialShortages.sourcePlanNumber}`
+                {k.materialShortages.sourcePlanNumber
+                  ? `آخرین اجرای برنامه‌ریزی: ${k.materialShortages.sourcePlanNumber}`
                   : 'برنامه‌ای اجرا نشده است'}
-                {ops.kpis.materialShortages.missingBomCount > 0
-                  ? ` — ${faNumber(ops.kpis.materialShortages.missingBomCount)} قلم بدون BOM`
-                  : ''}
+                {k.materialShortages.missingBomCount > 0 ? ` — ${faNumber(k.materialShortages.missingBomCount)} قلم بدون BOM` : ''}
               </div>
-            </div>
-            <div className="kpi-tile">
-              <div className="kpi-tile__head">
-                <span className="kpi-tile__label">قطعات در جریان ساخت (WIP)</span>
-                <Badge tone="ok">واقعی</Badge>
-              </div>
-              <div className="kpi-tile__value">{faNumber(Number(ops.kpis.wipQuantity.quantity))}</div>
-              <div className="kpi-tile__sub">جمع WIP دستور کارهای فعال</div>
-            </div>
-            <div className="kpi-tile">
-              <div className="kpi-tile__head">
-                <span className="kpi-tile__label">موجودی محصول تکمیلی</span>
-                <Badge tone="ok">واقعی</Badge>
-              </div>
-              <div className="kpi-tile__value">{faNumber(Number(ops.kpis.finishedGoodsStock.owned))}</div>
-              <div className="kpi-tile__sub">امانی: {faNumber(Number(ops.kpis.finishedGoodsStock.consignment))}</div>
-            </div>
-            <div className="kpi-tile">
-              <div className="kpi-tile__head">
-                <span className="kpi-tile__label">ضایعات (۳۰ روز)</span>
-                <Badge tone="ok">واقعی</Badge>
-              </div>
-              <div className="kpi-tile__value">{faNumber(Number(ops.kpis.scrap.quantity))}</div>
-              <div className="kpi-tile__sub">ثبت‌شده در گزارش‌های تولید</div>
             </div>
             <div className="kpi-tile">
               <div className="kpi-tile__head">
@@ -227,63 +311,17 @@ export function DashboardPage() {
                 <Badge tone="warn">تخمینی</Badge>
               </div>
               <div className="kpi-tile__value">
-                {ops.kpis.machineUtilization.averagePct === null ? '—' : `${faNumber(ops.kpis.machineUtilization.averagePct)}٪`}
+                {k.machineUtilization.averagePct === null ? '—' : `${faNumber(k.machineUtilization.averagePct)}٪`}
               </div>
               <div className="kpi-tile__sub">
-                {ops.kpis.machineUtilization.reliableMachineCount > 0
-                  ? `${faNumber(ops.kpis.machineUtilization.reliableMachineCount)} ماشین با داده ظرفیت قابل اتکا`
+                {k.machineUtilization.reliableMachineCount > 0
+                  ? `${faNumber(k.machineUtilization.reliableMachineCount)} ماشین با داده ظرفیت قابل اتکا`
                   : 'داده ظرفیت قابل اتکا موجود نیست'}
               </div>
             </div>
           </div>
-          <p className="kpi-note">{ops.kpis.machineUtilization.noteFa}</p>
-          <div className="quick-links">
-            <Link className="quick-link" to="/reports/plan-vs-actual"><Factory size={15} /> برنامه در مقابل عملکرد</Link>
-            <Link className="quick-link" to="/reports/order-fulfillment"><ClipboardList size={15} /> اقلای سفارش‌ها</Link>
-            <Link className="quick-link" to="/reports/wip-aging"><AlarmClock size={15} /> قداره WIP</Link>
-            <Link className="quick-link" to="/reports/backlog"><PackageX size={15} /> Backlog تولید</Link>
-            <Link className="quick-link" to="/reports/material-consumption"><Layers size={15} /> مصرف در مقابل سرانه</Link>
-            <Link className="quick-link" to="/reports/inventory-valuation"><Boxes size={15} /> موجودی انبار</Link>
-            <Link className="quick-link" to="/reports/scrap"><Trash2 size={15} /> گزارش ضایعات</Link>
-            <Link className="quick-link" to="/reports/machine-workload"><Gauge size={15} /> بار ماشین‌آلات</Link>
-            <Link className="quick-link" to="/reports"><TrendingUp size={15} /> همه گزارش‌ها</Link>
-          </div>
         </section>
       )}
-
-      <section className="card" aria-labelledby="modules-heading">
-        <div className="card__head">
-          <h3 id="modules-heading">ماژول‌ها و وضعیت پیاده‌سازی</h3>
-          <button className="btn btn--ghost btn--sm" onClick={() => void load()}>
-            <RefreshCw size={14} aria-hidden /> به‌روزرسانی
-          </button>
-        </div>
-        <ul className="module-list">
-          {MODULES.map((m) => (
-            <li key={m.key} className="module-list__item">
-              <div className="module-list__icon" aria-hidden>
-                <m.icon size={18} />
-              </div>
-              <div className="module-list__body">
-                <div className="module-list__title">
-                  {m.titleFa}
-                  <span className="module-list__en" dir="ltr">
-                    {m.titleEn}
-                  </span>
-                </div>
-                <div className="module-list__desc">{m.descriptionFa}</div>
-              </div>
-              <span className={`badge ${m.status === 'ready' ? 'badge--ok' : 'badge--planned'}`}>
-                {m.status === 'ready' ? 'فعال' : 'فاز بعدی'}
-              </span>
-            </li>
-          ))}
-        </ul>
-        <p className="card__note">
-          <Wrench size={13} aria-hidden /> ماژول‌های «فاز بعدی» ساختار دیتابیس و مسیر API آن‌ها از
-          همین حالا آماده است؛ فرم‌ها و منطق کسب‌وکار در فازهای آینده فعال می‌شود.
-        </p>
-      </section>
     </div>
   );
 }

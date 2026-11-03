@@ -1,9 +1,12 @@
 import { CrudPage } from '../../components/crud/CrudPage';
 import { Qty } from '../../components/ui';
 import { useLookups } from '../../lib/lookups';
+import { partQuickCreate, materialQuickCreate } from '../../lib/quickCreateSpecs';
+import { useAppSettings } from '../../lib/appSettings';
 
 export function BomPage() {
-  const { lookups } = useLookups();
+  const { lookups, reload } = useLookups();
+  const { settings } = useAppSettings();
   const partOptions = lookups.parts.map((p) => ({ value: p.id, label: `${p.partNumber} — ${p.nameFa}` }));
   const materialOptions = lookups.materials.map((m) => ({ value: m.id, label: `${m.materialCode} — ${m.nameFa}` }));
 
@@ -26,8 +29,24 @@ export function BomPage() {
         { key: 'notes', label: 'توضیحات' },
       ]}
       fields={[
-        { key: 'partId', label: 'قطعه', type: 'select', options: partOptions, required: true, wide: true },
-        { key: 'materialId', label: 'ماده اولیه', type: 'select', options: materialOptions, required: true, wide: true },
+        {
+          key: 'partId',
+          label: 'قطعه',
+          type: 'select',
+          options: partOptions,
+          required: true,
+          wide: true,
+          quickCreate: partQuickCreate(lookups),
+        },
+        {
+          key: 'materialId',
+          label: 'ماده اولیه',
+          type: 'select',
+          options: materialOptions,
+          required: true,
+          wide: true,
+          quickCreate: materialQuickCreate(lookups, settings),
+        },
         { key: 'quantityPerUnit', label: 'مقدار مصرف در هر عدد قطعه', type: 'number', step: '0.0001', required: true },
         { key: 'weightKgPerUnit', label: 'وزن معادل (کیلوگرم در هر عدد)', type: 'number', step: '0.0001' },
         { key: 'notes', label: 'توضیحات', type: 'textarea', wide: true },
@@ -37,6 +56,7 @@ export function BomPage() {
         materialId: row.materialId ?? '',
       })}
       emptyHint="برای محاسبه کسری مواد در برنامه‌ریزی، ابتدا سرانه مصرف هر قطعه را تعریف کنید"
+      reloadOptions={reload}
     />
   );
 }

@@ -4,9 +4,12 @@ import { CrudPage } from '../../components/crud/CrudPage';
 import { Badge, Qty, fa } from '../../components/ui';
 import { useLookups } from '../../lib/lookups';
 import { OPTION_SETS, faEx } from '../../lib/labels';
+import { unitQuickCreate, customerQuickCreate, materialQuickCreate } from '../../lib/quickCreateSpecs';
+import { useAppSettings } from '../../lib/appSettings';
 
 export function PartsPage() {
-  const { lookups } = useLookups();
+  const { lookups, reload } = useLookups();
+  const { settings } = useAppSettings();
   const unitOptions = lookups.units.map((u) => ({ value: u.id, label: `${u.nameFa} (${u.code})` }));
   const materialOptions = lookups.materials.map((m) => ({ value: m.id, label: `${m.materialCode} — ${m.nameFa}` }));
   const customerOptions = lookups.customers.map((c) => ({ value: c.id, label: `${c.code} — ${c.nameFa}` }));
@@ -49,16 +52,36 @@ export function PartsPage() {
         { key: 'nameFa', label: 'نام فارسی', required: true },
         { key: 'nameEn', label: 'نام انگلیسی' },
         { key: 'partType', label: 'نوع قطعه', type: 'select', options: OPTION_SETS.partType },
-        { key: 'baseUnitId', label: 'واحد پایه', type: 'select', options: unitOptions, required: true },
+        {
+          key: 'baseUnitId',
+          label: 'واحد پایه',
+          type: 'select',
+          options: unitOptions,
+          required: true,
+          quickCreate: unitQuickCreate(),
+        },
         { key: 'standardWeightKg', label: 'وزن استاندارد (کیلوگرم)', type: 'number', step: '0.0001' },
-        { key: 'mainMaterialId', label: 'ماده اصلی', type: 'select', options: materialOptions },
-        { key: 'primaryCustomerId', label: 'مشتری اصلی', type: 'select', options: customerOptions },
+        {
+          key: 'mainMaterialId',
+          label: 'ماده اصلی',
+          type: 'select',
+          options: materialOptions,
+          quickCreate: materialQuickCreate(lookups, settings),
+        },
+        {
+          key: 'primaryCustomerId',
+          label: 'مشتری اصلی',
+          type: 'select',
+          options: customerOptions,
+          quickCreate: customerQuickCreate(),
+        },
         { key: 'description', label: 'توضیحات', type: 'textarea', wide: true },
       ]}
       rowToForm={(row) => ({
         mainMaterialId: row.mainMaterialId ?? '',
         primaryCustomerId: row.primaryCustomerId ?? '',
       })}
+      reloadOptions={reload}
     />
   );
 }

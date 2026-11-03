@@ -26,7 +26,7 @@ const MODULE_FA: Record<string, string> = {
   wip: 'WIP',
   planning: 'برنامه‌ریزی',
   capacity: 'ماشین‌آلات و ظرفیت',
-  materials: 'مواد SAPCO',
+  materials: 'قراردادها و مواد تأمین‌کننده',
   reports: 'گزارش‌ها',
   settings: 'کاربران و تنظیمات',
 };

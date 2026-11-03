@@ -6,6 +6,7 @@ import { db } from '../../config/db';
 import { authenticate, requirePermission } from '../../middleware/auth';
 import { ApiError } from '../../lib/http';
 import { recordAudit } from '../../lib/audit';
+import { getPublicSettings } from '../../lib/settings';
 import { rowsToCsv } from '../masterdata/masterdata.controller';
 
 export const settingsRouter = Router();
@@ -20,6 +21,17 @@ const h =
 
 const manage = requirePermission('settings.manage');
 const view = requirePermission('settings.view');
+
+// ---------------------------------------------------------------------------
+// public settings — every authenticated user (whitelisted, non-secret keys)
+// ---------------------------------------------------------------------------
+
+settingsRouter.get(
+  '/public',
+  h(async (_req, res) => {
+    res.json({ settings: await getPublicSettings() });
+  }),
+);
 
 const publicUserSelect = {
   id: true,

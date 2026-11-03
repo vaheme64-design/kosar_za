@@ -5,6 +5,8 @@ import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
 import { Page, Card, Field, TextInput, Select, Button, ErrorBanner, Loading, fa } from '../../components/ui';
 import { SubNav } from '../../components/SubNav';
+import { QuickCreateButton } from '../../components/quickcreate/QuickCreate';
+import { shiftQuickCreate } from '../../lib/quickCreateSpecs';
 
 interface ScrapRow {
   key: number;
@@ -32,7 +34,7 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 export function ReportFormPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const { lookups, loading: lookupsLoading } = useLookups();
+  const { lookups, loading: lookupsLoading, reload } = useLookups();
   const [ops, setOps] = useState<OpRow[]>([]);
   const [operationId, setOperationId] = useState(params.get('operationId') ?? '');
   const [shiftId, setShiftId] = useState('');
@@ -156,12 +158,21 @@ export function ReportFormPage() {
             <TextInput type="date" value={reportDate} onChange={(e) => setReportDate(e.target.value)} />
           </Field>
           <Field label="شیفت">
-            <Select value={shiftId} onChange={(e) => setShiftId(e.target.value)}>
-              <option value="">— بدون شیفت —</option>
-              {lookups.shifts.map((s) => (
-                <option key={s.id} value={s.id}>{s.nameFa}</option>
-              ))}
-            </Select>
+            <div className="inline-controls">
+              <Select value={shiftId} onChange={(e) => setShiftId(e.target.value)}>
+                <option value="">— بدون شیفت —</option>
+                {lookups.shifts.map((s) => (
+                  <option key={s.id} value={s.id}>{s.nameFa}</option>
+                ))}
+              </Select>
+              <QuickCreateButton
+                spec={shiftQuickCreate()}
+                onCreated={async (id) => {
+                  await reload();
+                  if (id) setShiftId(id);
+                }}
+              />
+            </div>
           </Field>
           <Field label="ماشین">
             <Select value={machineId} onChange={(e) => setMachineId(e.target.value)}>

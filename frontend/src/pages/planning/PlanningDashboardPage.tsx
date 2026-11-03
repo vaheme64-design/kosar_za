@@ -5,6 +5,8 @@ import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
 import { Page, Card, Modal, Field, TextInput, Select, Button, Table, EmptyState, Loading, ErrorBanner, Badge, Qty, StatCardLike, fa } from '../../components/ui';
 import { formatJalaliDate, faNumber } from '../../lib/jalali';
+import { QuickCreateButton } from '../../components/quickcreate/QuickCreate';
+import { customerQuickCreate, partQuickCreate } from '../../lib/quickCreateSpecs';
 
 // ---------------------------------------------------------------------------
 // types (mirror of the API payloads)
@@ -64,7 +66,7 @@ interface OrderRow {
 
 export function PlanningDashboardPage() {
   const navigate = useNavigate();
-  const { lookups } = useLookups();
+  const { lookups, reload } = useLookups();
   const [dash, setDash] = useState<DashboardData | null>(null);
   const [plans, setPlans] = useState<PlanRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
@@ -286,12 +288,21 @@ export function PlanningDashboardPage() {
         <Modal title="سفارش مشتری جدید" onClose={() => setOrderModal(false)} wide>
           <div className="form-grid">
             <Field label="مشتری" required>
-              <Select value={orderForm.customerId} onChange={(e) => setOrderForm((f) => ({ ...f, customerId: e.target.value }))}>
-                <option value="">— انتخاب مشتری —</option>
-                {lookups.customers.map((c) => (
-                  <option key={c.id} value={c.id}>{c.nameFa} ({c.code})</option>
-                ))}
-              </Select>
+              <div className="inline-controls">
+                <Select value={orderForm.customerId} onChange={(e) => setOrderForm((f) => ({ ...f, customerId: e.target.value }))}>
+                  <option value="">— انتخاب مشتری —</option>
+                  {lookups.customers.map((c) => (
+                    <option key={c.id} value={c.id}>{c.nameFa} ({c.code})</option>
+                  ))}
+                </Select>
+                <QuickCreateButton
+                  spec={customerQuickCreate()}
+                  onCreated={async (id) => {
+                    await reload();
+                    if (id) setOrderForm((f) => ({ ...f, customerId: id }));
+                  }}
+                />
+              </div>
             </Field>
             <Field label="تاریخ سفارش" required>
               <TextInput type="date" value={orderForm.orderDate} onChange={(e) => setOrderForm((f) => ({ ...f, orderDate: e.target.value }))} />
@@ -308,12 +319,21 @@ export function PlanningDashboardPage() {
           {orderLines.map((l, i) => (
             <div key={i} className="form-grid" style={{ gridTemplateColumns: '2fr 1fr 1fr auto', alignItems: 'end' }}>
               <Field label="قطعه" required={i === 0}>
-                <Select value={l.partId} onChange={(e) => setOrderLines((arr) => arr.map((x, j) => (j === i ? { ...x, partId: e.target.value } : x)))}>
-                  <option value="">— انتخاب قطعه —</option>
-                  {lookups.parts.map((p) => (
-                    <option key={p.id} value={p.id}>{p.partNumber} — {p.nameFa}</option>
-                  ))}
-                </Select>
+                <div className="inline-controls">
+                  <Select value={l.partId} onChange={(e) => setOrderLines((arr) => arr.map((x, j) => (j === i ? { ...x, partId: e.target.value } : x)))}>
+                    <option value="">— انتخاب قطعه —</option>
+                    {lookups.parts.map((p) => (
+                      <option key={p.id} value={p.id}>{p.partNumber} — {p.nameFa}</option>
+                    ))}
+                  </Select>
+                  <QuickCreateButton
+                    spec={partQuickCreate(lookups)}
+                    onCreated={async (id) => {
+                      await reload();
+                      if (id) setOrderLines((arr) => arr.map((x, j) => (j === i ? { ...x, partId: id ?? x.partId } : x)));
+                    }}
+                  />
+                </div>
               </Field>
               <Field label="مقدار" required={i === 0}>
                 <TextInput type="number" min="1" step="1" value={l.quantity} onChange={(e) => setOrderLines((arr) => arr.map((x, j) => (j === i ? { ...x, quantity: e.target.value } : x)))} />

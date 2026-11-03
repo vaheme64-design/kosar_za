@@ -2,9 +2,12 @@ import { CrudPage } from '../../components/crud/CrudPage';
 import { Badge, Qty, fa } from '../../components/ui';
 import { useLookups } from '../../lib/lookups';
 import { OPTION_SETS, faEx } from '../../lib/labels';
+import { unitQuickCreate } from '../../lib/quickCreateSpecs';
+import { useAppSettings } from '../../lib/appSettings';
 
 export function MaterialsPage() {
-  const { lookups } = useLookups();
+  const { lookups, reload } = useLookups();
+  const { settings } = useAppSettings();
   const unitOptions = lookups.units.map((u) => ({ value: u.id, label: `${u.nameFa} (${u.code})` }));
 
   return (
@@ -46,10 +49,23 @@ export function MaterialsPage() {
         { key: 'widthMm', label: 'عرض (mm)', type: 'number', step: '0.01' },
         { key: 'lengthMm', label: 'طول (mm)', type: 'number', step: '0.01' },
         { key: 'unitWeightKg', label: 'وزن واحد (kg)', type: 'number', step: '0.0001' },
-        { key: 'baseUnitId', label: 'واحد پایه', type: 'select', options: unitOptions, required: true },
-        { key: 'supplierName', label: 'تأمین‌کننده', placeholder: 'SAPCO' },
+        {
+          key: 'baseUnitId',
+          label: 'واحد پایه',
+          type: 'select',
+          options: unitOptions,
+          required: true,
+          quickCreate: unitQuickCreate(),
+        },
+        {
+          key: 'supplierName',
+          label: 'تأمین‌کننده',
+          placeholder: settings['materials.defaultSupplierName'] || 'نام تأمین‌کننده',
+          hint: 'خالی بگذارید تا از تأمین‌کنندهٔ پیش‌فرض تنظیمات سامانه استفاده شود',
+        },
         { key: 'notes', label: 'توضیحات', type: 'textarea', wide: true },
       ]}
+      reloadOptions={reload}
     />
   );
 }

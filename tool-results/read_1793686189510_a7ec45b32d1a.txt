@@ -1,0 +1,795 @@
+     1→import { z } from 'zod';
+     2→import { ApiError } from '../../lib/http';
+     3→
+     4→/**
+     5→ * Master-data / capacity resource registry.
+     6→ *
+     7→ * A single declarative description per entity drives the generic CRUD,
+     8→ * search, CSV export and CSV import endpoints — so every master-data screen
+     9→ * gets the same behaviour (جستجو، خروجی و ورودی اکسل) without duplicated code.
+    10→ */
+    11→
+    12→export const decimalField = z
+    13→  .union([z.number(), z.string()])
+    14→  .transform((v) => String(v))
+    15→  .nullable()
+    16→  .optional();
+    17→
+    18→export const optionalTrimmed = (max: number) =>
+    19→  z
+    20→    .string()
+    21→    .trim()
+    22→    .max(max)
+    23→    .transform((v) => (v.length === 0 ? null : v))
+    24→    .nullable()
+    25→    .optional();
+    26→
+    27→export const requiredCode = (max: number) => z.string().trim().min(1).max(max);
+    28→
+    29→// ---------------------------------------------------------------------------
+    30→// column helpers — one definition drives both table UI and CSV export
+    31→// ---------------------------------------------------------------------------
+    32→
+    33→export interface CsvColumn {
+    34→  /** Persian Excel header */
+    35→  header: string;
+    36→  /** row key for scalar columns (used when `get` is absent) */
+    37→  key?: string;
+    38→  /** custom value for export; return string | number | null */
+    39→  get?: (row: any) => string | number | null;
+    40→}
+    41→
+    42→export interface ImportColumn {
+    43→  /** CSV header name (Persian) — matching is trimmed + whitespace-insensitive */
+    44→  header: string;
+    45→  /** target key in the prisma data object */
+    46→  key: string;
+    47→  kind?: 'string' | 'int' | 'decimal' | 'boolean' | 'enum';
+    48→  /** allowed enum values (kind = enum) */
+    49→  values?: readonly string[];
+    50→  /** required in every imported row */
+    51→  required?: boolean;
+    52→  /** resolve external reference (returns id or throws Persian error) */
+    53→  ref?: 'unit' | 'material' | 'part' | 'machine' | 'operation' | 'die' | 'warehouse' | 'customer';
+    54→}
+    55→
+    56→export interface ResourceDef {
+    57→  key: string;
+    58→  /** prisma delegate name */
+    59→  model: string;
+    60→  /** permission module used for view/manage guards */
+    61→  permModule: string;
+    62→  labelFa: string;
+    63→  uniqueField: string;
+    64→  /** free-text search across these scalar fields (contains, insensitive) */
+    65→  searchFields: string[];
+    66→  /** free-text search inside relations, e.g. { part: ['partNumber','nameFa'] } */
+    67→  searchRelations?: Record<string, string[]>;
+    68→  /** exact-match query filters allowed (field → optional value map) */
+    69→  filters: string[];
+    70→  /** enum filters: { [queryKey]: allowedValues } — validated before query */
+    71→  enumFilters?: Record<string, readonly string[]>;
+    72→  orderBy: Record<string, 'asc' | 'desc'>;
+    73→  /** prisma include for list/get (kept small) */
+    74→  include?: Record<string, unknown>;
+    75→  /** extra relation filter applied to list (e.g. location belongs to warehouse) */
+    76→  create: z.ZodTypeAny;
+    77→  update: z.ZodTypeAny;
+    78→  /** CSV export columns */
+    79→  columns: CsvColumn[];
+    80→  /** CSV import mapping — omit for resources without import (e.g. joins handled elsewhere) */
+    81→  import?: { columns: ImportColumn[]; example: Record<string, string> };
+    82→  /** delete strategy */
+    83→  remove: 'soft' | 'hard';
+    84→  /** for soft: field + inactive value */
+    85→  soft?: { field: 'status' | 'isActive'; value: unknown; activeWhere?: Record<string, unknown> };
+    86→}
+    87→
+    88→// ---------------------------------------------------------------------------
+    89→// enum values (mirrors prisma schema)
+    90→// ---------------------------------------------------------------------------
+    91→
+    92→const PART_TYPES = ['FINISHED_PART', 'SEMI_FINISHED', 'SUBASSEMBLY'] as const;
+    93→const PART_STATUSES = ['ACTIVE', 'INACTIVE', 'PHASED_OUT'] as const;
+    94→const MATERIAL_TYPES = ['SHEET', 'COIL', 'PROFILE', 'PAINT', 'CONSUMABLE', 'OTHER'] as const;
+    95→const MATERIAL_STATUSES = ['ACTIVE', 'INACTIVE'] as const;
+    96→const UNIT_KINDS = ['COUNT', 'WEIGHT', 'LENGTH', 'AREA'] as const;
+    97→const MACHINE_TYPES = ['PRESS', 'CUTTING', 'PRESS_WELDING', 'CO2_WELDING', 'PAINTING', 'ASSEMBLY', 'OTHER'] as const;
+    98→const MACHINE_STATUSES = ['ACTIVE', 'MAINTENANCE', 'BREAKDOWN', 'RETIRED'] as const;
+    99→const DIE_STATUSES = ['ACTIVE', 'MAINTENANCE', 'RETIRED'] as const;
+   100→const WAREHOUSE_TYPES = ['RAW_MATERIAL', 'WIP', 'FINISHED_GOODS', 'SCRAP', 'TOOLS'] as const;
+   101→const ROUTE_STATUSES = ['DRAFT', 'ACTIVE', 'RETIRED'] as const;
+   102→const CONTRACT_STATUSES = ['OPEN', 'PARTIALLY_RECEIVED', 'COMPLETED', 'CANCELLED'] as const;
+   103→
+   104→export const MD_ENUMS: Record<string, readonly string[]> = {
+   105→  partType: PART_TYPES,
+   106→  partStatus: PART_STATUSES,
+   107→  materialType: MATERIAL_TYPES,
+   108→  materialStatus: MATERIAL_STATUSES,
+   109→  unitKind: UNIT_KINDS,
+   110→  machineType: MACHINE_TYPES,
+   111→  machineStatus: MACHINE_STATUSES,
+   112→  dieStatus: DIE_STATUSES,
+   113→  warehouseType: WAREHOUSE_TYPES,
+   114→  routeStatus: ROUTE_STATUSES,
+   115→  contractStatus: CONTRACT_STATUSES,
+   116→};
+   117→
+   118→// ---------------------------------------------------------------------------
+   119→// resources
+   120→// ---------------------------------------------------------------------------
+   121→
+   122→export const RESOURCES: Record<string, ResourceDef> = {
+   123→  parts: {
+   124→    key: 'parts',
+   125→    model: 'part',
+   126→    permModule: 'masterdata',
+   127→    labelFa: 'قطعه',
+   128→    uniqueField: 'partNumber',
+   129→    searchFields: ['partNumber', 'nameFa', 'nameEn', 'description'],
+   130→    filters: ['partType', 'mainMaterialId', 'primaryCustomerId', 'baseUnitId'],
+   131→    enumFilters: { partType: PART_TYPES, status: PART_STATUSES },
+   132→    orderBy: { partNumber: 'asc' },
+   133→    include: {
+   134→      baseUnit: { select: { code: true, nameFa: true } },
+   135→      mainMaterial: { select: { materialCode: true, nameFa: true } },
+   136→      primaryCustomer: { select: { code: true, nameFa: true } },
+   137→    },
+   138→    create: z.object({
+   139→      partNumber: requiredCode(64),
+   140→      nameFa: requiredCode(190),
+   141→      nameEn: optionalTrimmed(190),
+   142→      partType: z.enum(PART_TYPES).optional(),
+   143→      status: z.enum(PART_STATUSES).optional(),
+   144→      baseUnitId: z.string().uuid(),
+   145→      standardWeightKg: decimalField,
+   146→      mainMaterialId: z.string().uuid().nullish(),
+   147→      primaryCustomerId: z.string().uuid().nullish(),
+   148→      description: optionalTrimmed(2000),
+   149→    }),
+   150→    update: z.object({
+   151→      nameFa: requiredCode(190).optional(),
+   152→      nameEn: optionalTrimmed(190),
+   153→      partType: z.enum(PART_TYPES).optional(),
+   154→      status: z.enum(PART_STATUSES).optional(),
+   155→      baseUnitId: z.string().uuid().optional(),
+   156→      standardWeightKg: decimalField,
+   157→      mainMaterialId: z.string().uuid().nullish(),
+   158→      primaryCustomerId: z.string().uuid().nullish(),
+   159→      description: optionalTrimmed(2000),
+   160→    }),
+   161→    remove: 'soft',
+   162→    soft: { field: 'status', value: 'INACTIVE' },
+   163→    columns: [
+   164→      { header: 'شماره قطعه', key: 'partNumber' },
+   165→      { header: 'نام فارسی', key: 'nameFa' },
+   166→      { header: 'نام انگلیسی', get: (r) => r.nameEn },
+   167→      { header: 'نوع', get: (r) => r.partType },
+   168→      { header: 'وضعیت', get: (r) => r.status },
+   169→      { header: 'واحد', get: (r) => r.baseUnit?.nameFa ?? '' },
+   170→      { header: 'وزن استاندارد (کیلوگرم)', get: (r) => r.standardWeightKg },
+   171→      { header: 'ماده اصلی', get: (r) => r.mainMaterial?.nameFa ?? '' },
+   172→      { header: 'مشتری اصلی', get: (r) => r.primaryCustomer?.nameFa ?? '' },
+   173→      { header: 'توضیحات', get: (r) => r.description },
+   174→    ],
+   175→    import: {
+   176→      example: { 'شماره قطعه': 'K-1234', 'نام فارسی': 'یراق درب جلو چپ', واحد: 'PCS', 'وزن استاندارد (کیلوگرم)': '2.35' },
+   177→      columns: [
+   178→        { header: 'شماره قطعه', key: 'partNumber', required: true },
+   179→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   180→        { header: 'نام انگلیسی', key: 'nameEn' },
+   181→        { header: 'نوع', key: 'partType', kind: 'enum', values: PART_TYPES },
+   182→        { header: 'واحد', key: 'baseUnitId', kind: 'string', ref: 'unit', required: true },
+   183→        { header: 'وزن استاندارد (کیلوگرم)', key: 'standardWeightKg', kind: 'decimal' },
+   184→        { header: 'ماده اصلی', key: 'mainMaterialId', ref: 'material' },
+   185→        { header: 'مشتری اصلی', key: 'primaryCustomerId', ref: 'customer' },
+   186→        { header: 'توضیحات', key: 'description' },
+   187→      ],
+   188→    },
+   189→  },
+   190→
+   191→  materials: {
+   192→    key: 'materials',
+   193→    model: 'material',
+   194→    permModule: 'masterdata',
+   195→    labelFa: 'ماده اولیه',
+   196→    uniqueField: 'materialCode',
+   197→    searchFields: ['materialCode', 'nameFa', 'nameEn', 'grade', 'supplierName'],
+   198→    filters: ['materialType', 'supplierName', 'baseUnitId'],
+   199→    enumFilters: { materialType: MATERIAL_TYPES, status: MATERIAL_STATUSES },
+   200→    orderBy: { materialCode: 'asc' },
+   201→    include: { baseUnit: { select: { code: true, nameFa: true } } },
+   202→    create: z.object({
+   203→      materialCode: requiredCode(64),
+   204→      nameFa: requiredCode(190),
+   205→      nameEn: optionalTrimmed(190),
+   206→      materialType: z.enum(MATERIAL_TYPES).optional(),
+   207→      grade: optionalTrimmed(64),
+   208→      thicknessMm: decimalField,
+   209→      widthMm: decimalField,
+   210→      lengthMm: decimalField,
+   211→      unitWeightKg: decimalField,
+   212→      baseUnitId: z.string().uuid(),
+   213→      supplierName: z.string().trim().min(1).max(190).optional(),
+   214→      status: z.enum(MATERIAL_STATUSES).optional(),
+   215→      notes: optionalTrimmed(2000),
+   216→    }),
+   217→    update: z.object({
+   218→      nameFa: requiredCode(190).optional(),
+   219→      nameEn: optionalTrimmed(190),
+   220→      materialType: z.enum(MATERIAL_TYPES).optional(),
+   221→      grade: optionalTrimmed(64),
+   222→      thicknessMm: decimalField,
+   223→      widthMm: decimalField,
+   224→      lengthMm: decimalField,
+   225→      unitWeightKg: decimalField,
+   226→      baseUnitId: z.string().uuid().optional(),
+   227→      supplierName: z.string().trim().min(1).max(190).optional(),
+   228→      status: z.enum(MATERIAL_STATUSES).optional(),
+   229→      notes: optionalTrimmed(2000),
+   230→    }),
+   231→    remove: 'soft',
+   232→    soft: { field: 'status', value: 'INACTIVE' },
+   233→    columns: [
+   234→      { header: 'کد ماده', key: 'materialCode' },
+   235→      { header: 'نام فارسی', key: 'nameFa' },
+   236→      { header: 'نام انگلیسی', get: (r) => r.nameEn },
+   237→      { header: 'نوع', get: (r) => r.materialType },
+   238→      { header: 'گرید', get: (r) => r.grade },
+   239→      { header: 'ضخامت (میلی‌متر)', get: (r) => r.thicknessMm },
+   240→      { header: 'عرض (میلی‌متر)', get: (r) => r.widthMm },
+   241→      { header: 'طول (میلی‌متر)', get: (r) => r.lengthMm },
+   242→      { header: 'وزن واحد (کیلوگرم)', get: (r) => r.unitWeightKg },
+   243→      { header: 'واحد', get: (r) => r.baseUnit?.nameFa ?? '' },
+   244→      { header: 'تأمین‌کننده', get: (r) => r.supplierName },
+   245→      { header: 'وضعیت', get: (r) => r.status },
+   246→      { header: 'توضیحات', get: (r) => r.notes },
+   247→    ],
+   248→    import: {
+   249→      example: { 'کد ماده': 'SHEET-ST12-1.5', 'نام فارسی': 'ورق ST12 ضخامت ۱٫۵', واحد: 'KG', 'ضخامت (میلی‌متر)': '1.5' },
+   250→      columns: [
+   251→        { header: 'کد ماده', key: 'materialCode', required: true },
+   252→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   253→        { header: 'نام انگلیسی', key: 'nameEn' },
+   254→        { header: 'نوع', key: 'materialType', kind: 'enum', values: MATERIAL_TYPES },
+   255→        { header: 'گرید', key: 'grade' },
+   256→        { header: 'ضخامت (میلی‌متر)', key: 'thicknessMm', kind: 'decimal' },
+   257→        { header: 'عرض (میلی‌متر)', key: 'widthMm', kind: 'decimal' },
+   258→        { header: 'طول (میلی‌متر)', key: 'lengthMm', kind: 'decimal' },
+   259→        { header: 'وزن واحد (کیلوگرم)', key: 'unitWeightKg', kind: 'decimal' },
+   260→        { header: 'واحد', key: 'baseUnitId', ref: 'unit', required: true },
+   261→        { header: 'تأمین‌کننده', key: 'supplierName' },
+   262→        { header: 'توضیحات', key: 'notes' },
+   263→      ],
+   264→    },
+   265→  },
+   266→
+   267→  units: {
+   268→    key: 'units',
+   269→    model: 'unitOfMeasure',
+   270→    permModule: 'masterdata',
+   271→    labelFa: 'واحد شمارش',
+   272→    uniqueField: 'code',
+   273→    searchFields: ['code', 'nameFa', 'nameEn'],
+   274→    filters: [],
+   275→    enumFilters: { kind: UNIT_KINDS },
+   276→    orderBy: { code: 'asc' },
+   277→    create: z.object({
+   278→      code: requiredCode(16),
+   279→      nameFa: requiredCode(190),
+   280→      nameEn: requiredCode(190),
+   281→      kind: z.enum(UNIT_KINDS).optional(),
+   282→      isActive: z.boolean().optional(),
+   283→    }),
+   284→    update: z.object({
+   285→      nameFa: requiredCode(190).optional(),
+   286→      nameEn: requiredCode(190).optional(),
+   287→      kind: z.enum(UNIT_KINDS).optional(),
+   288→      isActive: z.boolean().optional(),
+   289→    }),
+   290→    remove: 'soft',
+   291→    soft: { field: 'isActive', value: false },
+   292→    columns: [
+   293→      { header: 'کد', key: 'code' },
+   294→      { header: 'نام فارسی', key: 'nameFa' },
+   295→      { header: 'نام انگلیسی', key: 'nameEn' },
+   296→      { header: 'نوع', get: (r) => r.kind },
+   297→      { header: 'فعال', get: (r) => (r.isActive ? 'بله' : 'خیر') },
+   298→    ],
+   299→    import: {
+   300→      example: { کد: 'SET', 'نام فارسی': 'دستگاه', 'نام انگلیسی': 'Set', نوع: 'COUNT' },
+   301→      columns: [
+   302→        { header: 'کد', key: 'code', required: true },
+   303→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   304→        { header: 'نام انگلیسی', key: 'nameEn', required: true },
+   305→        { header: 'نوع', key: 'kind', kind: 'enum', values: UNIT_KINDS },
+   306→      ],
+   307→    },
+   308→  },
+   309→
+   310→  operations: {
+   311→    key: 'operations',
+   312→    model: 'operation',
+   313→    permModule: 'masterdata',
+   314→    labelFa: 'عملیات تولید',
+   315→    uniqueField: 'code',
+   316→    searchFields: ['code', 'nameFa', 'nameEn', 'description'],
+   317→    filters: [],
+   318→    enumFilters: {},
+   319→    orderBy: { code: 'asc' },
+   320→    create: z.object({
+   321→      code: requiredCode(16),
+   322→      nameFa: requiredCode(190),
+   323→      nameEn: requiredCode(190),
+   324→      description: optionalTrimmed(2000),
+   325→      defaultSetupTimeMin: z.number().int().min(0).nullish(),
+   326→      defaultCycleTimeSec: decimalField,
+   327→      requiresDie: z.boolean().optional(),
+   328→      isActive: z.boolean().optional(),
+   329→    }),
+   330→    update: z.object({
+   331→      nameFa: requiredCode(190).optional(),
+   332→      nameEn: requiredCode(190).optional(),
+   333→      description: optionalTrimmed(2000),
+   334→      defaultSetupTimeMin: z.number().int().min(0).nullish(),
+   335→      defaultCycleTimeSec: decimalField,
+   336→      requiresDie: z.boolean().optional(),
+   337→      isActive: z.boolean().optional(),
+   338→    }),
+   339→    remove: 'soft',
+   340→    soft: { field: 'isActive', value: false },
+   341→    columns: [
+   342→      { header: 'کد', key: 'code' },
+   343→      { header: 'نام فارسی', key: 'nameFa' },
+   344→      { header: 'نام انگلیسی', key: 'nameEn' },
+   345→      { header: 'زمان راه‌اندازی (دقیقه)', get: (r) => r.defaultSetupTimeMin },
+   346→      { header: 'زمان سیکل (ثانیه)', get: (r) => r.defaultCycleTimeSec },
+   347→      { header: 'نیازمند قالب', get: (r) => (r.requiresDie ? 'بله' : 'خیر') },
+   348→      { header: 'فعال', get: (r) => (r.isActive ? 'بله' : 'خیر') },
+   349→    ],
+   350→    import: {
+   351→      example: { کد: 'INS', 'نام فارسی': 'بازرسی', 'نام انگلیسی': 'Inspection' },
+   352→      columns: [
+   353→        { header: 'کد', key: 'code', required: true },
+   354→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   355→        { header: 'نام انگلیسی', key: 'nameEn', required: true },
+   356→        { header: 'زمان راه‌اندازی (دقیقه)', key: 'defaultSetupTimeMin', kind: 'int' },
+   357→        { header: 'زمان سیکل (ثانیه)', key: 'defaultCycleTimeSec', kind: 'decimal' },
+   358→        { header: 'نیازمند قالب', key: 'requiresDie', kind: 'boolean' },
+   359→      ],
+   360→    },
+   361→  },
+   362→
+   363→  warehouses: {
+   364→    key: 'warehouses',
+   365→    model: 'warehouse',
+   366→    permModule: 'masterdata',
+   367→    labelFa: 'انبار',
+   368→    uniqueField: 'code',
+   369→    searchFields: ['code', 'nameFa', 'notes'],
+   370→    filters: [],
+   371→    enumFilters: { warehouseType: WAREHOUSE_TYPES },
+   372→    orderBy: { code: 'asc' },
+   373→    include: { _count: { select: { locations: true } } },
+   374→    create: z.object({
+   375→      code: requiredCode(16),
+   376→      nameFa: requiredCode(190),
+   377→      warehouseType: z.enum(WAREHOUSE_TYPES),
+   378→      isActive: z.boolean().optional(),
+   379→      notes: optionalTrimmed(2000),
+   380→    }),
+   381→    update: z.object({
+   382→      nameFa: requiredCode(190).optional(),
+   383→      warehouseType: z.enum(WAREHOUSE_TYPES).optional(),
+   384→      isActive: z.boolean().optional(),
+   385→      notes: optionalTrimmed(2000),
+   386→    }),
+   387→    remove: 'soft',
+   388→    soft: { field: 'isActive', value: false },
+   389→    columns: [
+   390→      { header: 'کد', key: 'code' },
+   391→      { header: 'نام فارسی', key: 'nameFa' },
+   392→      { header: 'نوع', get: (r) => r.warehouseType },
+   393→      { header: 'تعداد موقعیت', get: (r) => r._count?.locations ?? 0 },
+   394→      { header: 'فعال', get: (r) => (r.isActive ? 'بله' : 'خیر') },
+   395→      { header: 'توضیحات', get: (r) => r.notes },
+   396→    ],
+   397→    import: {
+   398→      example: { کد: 'WH-TOOL', 'نام فارسی': 'انبار ابزار', نوع: 'TOOLS' },
+   399→      columns: [
+   400→        { header: 'کد', key: 'code', required: true },
+   401→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   402→        { header: 'نوع', key: 'warehouseType', kind: 'enum', values: WAREHOUSE_TYPES, required: true },
+   403→        { header: 'توضیحات', key: 'notes' },
+   404→      ],
+   405→    },
+   406→  },
+   407→
+   408→  'warehouse-locations': {
+   409→    key: 'warehouse-locations',
+   410→    model: 'warehouseLocation',
+   411→    permModule: 'masterdata',
+   412→    labelFa: 'موقعیت انبار',
+   413→    uniqueField: 'code',
+   414→    searchFields: ['code', 'nameFa'],
+   415→    filters: ['warehouseId'],
+   416→    enumFilters: {},
+   417→    orderBy: { code: 'asc' },
+   418→    include: { warehouse: { select: { code: true, nameFa: true } } },
+   419→    create: z.object({
+   420→      warehouseId: z.string().uuid(),
+   421→      code: requiredCode(32),
+   422→      nameFa: requiredCode(190),
+   423→      capacityKg: decimalField,
+   424→      isActive: z.boolean().optional(),
+   425→    }),
+   426→    update: z.object({
+   427→      nameFa: requiredCode(190).optional(),
+   428→      capacityKg: decimalField,
+   429→      isActive: z.boolean().optional(),
+   430→    }),
+   431→    remove: 'soft',
+   432→    soft: { field: 'isActive', value: false },
+   433→    columns: [
+   434→      { header: 'کد', key: 'code' },
+   435→      { header: 'نام فارسی', key: 'nameFa' },
+   436→      { header: 'انبار', get: (r) => r.warehouse?.nameFa ?? '' },
+   437→      { header: 'ظرفیت (کیلوگرم)', get: (r) => r.capacityKg },
+   438→      { header: 'فعال', get: (r) => (r.isActive ? 'بله' : 'خیر') },
+   439→    ],
+   440→    import: {
+   441→      example: { کد: 'RM-B01', 'نام فارسی': 'قفسه B ردیف ۱', انبار: 'WH-RM' },
+   442→      columns: [
+   443→        { header: 'کد', key: 'code', required: true },
+   444→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   445→        { header: 'انبار', key: 'warehouseId', ref: 'warehouse', required: true },
+   446→        { header: 'ظرفیت (کیلوگرم)', key: 'capacityKg', kind: 'decimal' },
+   447→      ],
+   448→    },
+   449→  },
+   450→
+   451→  shifts: {
+   452→    key: 'shifts',
+   453→    model: 'shift',
+   454→    permModule: 'masterdata',
+   455→    labelFa: 'شیفت کاری',
+   456→    uniqueField: 'code',
+   457→    searchFields: ['code', 'nameFa'],
+   458→    filters: [],
+   459→    enumFilters: {},
+   460→    orderBy: { code: 'asc' },
+   461→    create: z.object({
+   462→      code: requiredCode(16),
+   463→      nameFa: requiredCode(190),
+   464→      startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'ساعت به قالب HH:MM'),
+   465→      endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'ساعت به قالب HH:MM'),
+   466→      isActive: z.boolean().optional(),
+   467→    }),
+   468→    update: z.object({
+   469→      nameFa: requiredCode(190).optional(),
+   470→      startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'ساعت به قالب HH:MM').optional(),
+   471→      endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'ساعت به قالب HH:MM').optional(),
+   472→      isActive: z.boolean().optional(),
+   473→    }),
+   474→    remove: 'soft',
+   475→    soft: { field: 'isActive', value: false },
+   476→    columns: [
+   477→      { header: 'کد', key: 'code' },
+   478→      { header: 'نام فارسی', key: 'nameFa' },
+   479→      { header: 'ساعت شروع', key: 'startTime' },
+   480→      { header: 'ساعت پایان', key: 'endTime' },
+   481→      { header: 'فعال', get: (r) => (r.isActive ? 'بله' : 'خیر') },
+   482→    ],
+   483→    import: {
+   484→      example: { کد: 'SH4', 'نام فارسی': 'شیفت تسهیلات', 'ساعت شروع': '22:30', 'ساعت پایان': '06:30' },
+   485→      columns: [
+   486→        { header: 'کد', key: 'code', required: true },
+   487→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   488→        { header: 'ساعت شروع', key: 'startTime', required: true },
+   489→        { header: 'ساعت پایان', key: 'endTime', required: true },
+   490→      ],
+   491→    },
+   492→  },
+   493→
+   494→  customers: {
+   495→    key: 'customers',
+   496→    model: 'customer',
+   497→    permModule: 'masterdata',
+   498→    labelFa: 'مشتری',
+   499→    uniqueField: 'code',
+   500→    searchFields: ['code', 'nameFa', 'nameEn', 'contactPerson', 'phone'],
+   501→    filters: [],
+   502→    enumFilters: {},
+   503→    orderBy: { code: 'asc' },
+   504→    create: z.object({
+   505→      code: requiredCode(32),
+   506→      nameFa: requiredCode(190),
+   507→      nameEn: optionalTrimmed(190),
+   508→      contactPerson: optionalTrimmed(190),
+   509→      phone: optionalTrimmed(32),
+   510→      email: optionalTrimmed(190),
+   511→      address: optionalTrimmed(2000),
+   512→      isActive: z.boolean().optional(),
+   513→    }),
+   514→    update: z.object({
+   515→      nameFa: requiredCode(190).optional(),
+   516→      nameEn: optionalTrimmed(190),
+   517→      contactPerson: optionalTrimmed(190),
+   518→      phone: optionalTrimmed(32),
+   519→      email: optionalTrimmed(190),
+   520→      address: optionalTrimmed(2000),
+   521→      isActive: z.boolean().optional(),
+   522→    }),
+   523→    remove: 'soft',
+   524→    soft: { field: 'isActive', value: false },
+   525→    columns: [
+   526→      { header: 'کد', key: 'code' },
+   527→      { header: 'نام فارسی', key: 'nameFa' },
+   528→      { header: 'نام انگلیسی', get: (r) => r.nameEn },
+   529→      { header: 'رابط', get: (r) => r.contactPerson },
+   530→      { header: 'تلفن', get: (r) => r.phone },
+   531→      { header: 'ایمیل', get: (r) => r.email },
+   532→      { header: 'فعال', get: (r) => (r.isActive ? 'بله' : 'خیر') },
+   533→    ],
+   534→    import: {
+   535→      example: { کد: 'CUST-003', 'نام فارسی': 'مدیران خودرو' },
+   536→      columns: [
+   537→        { header: 'کد', key: 'code', required: true },
+   538→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   539→        { header: 'نام انگلیسی', key: 'nameEn' },
+   540→        { header: 'رابط', key: 'contactPerson' },
+   541→        { header: 'تلفن', key: 'phone' },
+   542→        { header: 'ایمیل', key: 'email' },
+   543→        { header: 'آدرس', key: 'address' },
+   544→      ],
+   545→    },
+   546→  },
+   547→
+   548→  // ----- capacity-domain resources (ماشین‌آلات و ظرفیت) -----
+   549→
+   550→  machines: {
+   551→    key: 'machines',
+   552→    model: 'machine',
+   553→    permModule: 'capacity',
+   554→    labelFa: 'ماشین',
+   555→    uniqueField: 'code',
+   556→    searchFields: ['code', 'nameFa', 'nameEn', 'manufacturer', 'location'],
+   557→    filters: ['machineType', 'location'],
+   558→    enumFilters: { machineType: MACHINE_TYPES, status: MACHINE_STATUSES },
+   559→    orderBy: { code: 'asc' },
+   560→    include: { _count: { select: { capabilities: true, dieCompatibilities: true } } },
+   561→    create: z.object({
+   562→      code: requiredCode(32),
+   563→      nameFa: requiredCode(190),
+   564→      nameEn: optionalTrimmed(190),
+   565→      machineType: z.enum(MACHINE_TYPES),
+   566→      tonnage: decimalField,
+   567→      manufacturer: optionalTrimmed(190),
+   568→      location: optionalTrimmed(190),
+   569→      status: z.enum(MACHINE_STATUSES).optional(),
+   570→      notes: optionalTrimmed(2000),
+   571→    }),
+   572→    update: z.object({
+   573→      nameFa: requiredCode(190).optional(),
+   574→      nameEn: optionalTrimmed(190),
+   575→      machineType: z.enum(MACHINE_TYPES).optional(),
+   576→      tonnage: decimalField,
+   577→      manufacturer: optionalTrimmed(190),
+   578→      location: optionalTrimmed(190),
+   579→      status: z.enum(MACHINE_STATUSES).optional(),
+   580→      notes: optionalTrimmed(2000),
+   581→    }),
+   582→    remove: 'soft',
+   583→    soft: { field: 'status', value: 'RETIRED' },
+   584→    columns: [
+   585→      { header: 'کد', key: 'code' },
+   586→      { header: 'نام فارسی', key: 'nameFa' },
+   587→      { header: 'نوع ماشین', get: (r) => r.machineType },
+   588→      { header: 'تناژ (تن)', get: (r) => r.tonnage },
+   589→      { header: 'سازنده', get: (r) => r.manufacturer },
+   590→      { header: 'محل استقرار', get: (r) => r.location },
+   591→      { header: 'وضعیت', get: (r) => r.status },
+   592→      { header: 'تعداد توانمندی', get: (r) => r._count?.capabilities ?? 0 },
+   593→      { header: 'تعداد قالب سازگار', get: (r) => r._count?.dieCompatibilities ?? 0 },
+   594→    ],
+   595→    import: {
+   596→      example: { کد: 'PRS-210', 'نام فارسی': 'پرس ۲۰۰ تن', 'نوع ماشین': 'PRESS', 'تناژ (تن)': '200' },
+   597→      columns: [
+   598→        { header: 'کد', key: 'code', required: true },
+   599→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   600→        { header: 'نوع ماشین', key: 'machineType', kind: 'enum', values: MACHINE_TYPES, required: true },
+   601→        { header: 'تناژ (تن)', key: 'tonnage', kind: 'decimal' },
+   602→        { header: 'سازنده', key: 'manufacturer' },
+   603→        { header: 'محل استقرار', key: 'location' },
+   604→        { header: 'وضعیت', key: 'status', kind: 'enum', values: MACHINE_STATUSES },
+   605→        { header: 'توضیحات', key: 'notes' },
+   606→      ],
+   607→    },
+   608→  },
+   609→
+   610→  dies: {
+   611→    key: 'dies',
+   612→    model: 'die',
+   613→    permModule: 'capacity',
+   614→    labelFa: 'قالب',
+   615→    uniqueField: 'code',
+   616→    searchFields: ['code', 'nameFa', 'description', 'storageLocation'],
+   617→    filters: [],
+   618→    enumFilters: { status: DIE_STATUSES },
+   619→    orderBy: { code: 'asc' },
+   620→    include: { _count: { select: { dieCompatibilities: true, routeSteps: true } } },
+   621→    create: z.object({
+   622→      code: requiredCode(32),
+   623→      nameFa: requiredCode(190),
+   624→      description: optionalTrimmed(2000),
+   625→      status: z.enum(DIE_STATUSES).optional(),
+   626→      storageLocation: optionalTrimmed(190),
+   627→      notes: optionalTrimmed(2000),
+   628→    }),
+   629→    update: z.object({
+   630→      nameFa: requiredCode(190).optional(),
+   631→      description: optionalTrimmed(2000),
+   632→      status: z.enum(DIE_STATUSES).optional(),
+   633→      storageLocation: optionalTrimmed(190),
+   634→      notes: optionalTrimmed(2000),
+   635→    }),
+   636→    remove: 'soft',
+   637→    soft: { field: 'status', value: 'RETIRED' },
+   638→    columns: [
+   639→      { header: 'کد', key: 'code' },
+   640→      { header: 'نام فارسی', key: 'nameFa' },
+   641→      { header: 'وضعیت', get: (r) => r.status },
+   642→      { header: 'محل نگهداری', get: (r) => r.storageLocation },
+   643→      { header: 'تعداد ماشین سازگار', get: (r) => r._count?.dieCompatibilities ?? 0 },
+   644→      { header: 'توضیحات', get: (r) => r.description },
+   645→    ],
+   646→    import: {
+   647→      example: { کد: 'DIE-105', 'نام فارسی': 'قالب فرم سپر' },
+   648→      columns: [
+   649→        { header: 'کد', key: 'code', required: true },
+   650→        { header: 'نام فارسی', key: 'nameFa', required: true },
+   651→        { header: 'وضعیت', key: 'status', kind: 'enum', values: DIE_STATUSES },
+   652→        { header: 'محل نگهداری', key: 'storageLocation' },
+   653→        { header: 'توضیحات', key: 'description' },
+   654→      ],
+   655→    },
+   656→  },
+   657→
+   658→  routes: {
+   659→    key: 'routes',
+   660→    model: 'partRoute',
+   661→    permModule: 'masterdata',
+   662→    labelFa: 'مسیر تولید',
+   663→    uniqueField: 'id',
+   664→    searchFields: ['name', 'description'],
+   665→    searchRelations: { part: ['partNumber', 'nameFa'] },
+   666→    filters: ['partId'],
+   667→    enumFilters: { status: ROUTE_STATUSES },
+   668→    orderBy: { updatedAt: 'desc' },
+   669→    include: {
+   670→      part: { select: { partNumber: true, nameFa: true } },
+   671→      steps: {
+   672→        orderBy: { sequence: 'asc' },
+   673→        include: {
+   674→          operation: { select: { code: true, nameFa: true } },
+   675→          machine: { select: { code: true, nameFa: true } },
+   676→          die: { select: { code: true, nameFa: true } },
+   677→        },
+   678→      },
+   679→      _count: { select: { manufacturingOrders: true } },
+   680→    },
+   681→    create: z.object({
+   682→      partId: z.string().uuid(),
+   683→      version: z.number().int().min(1).optional(),
+   684→      name: optionalTrimmed(190),
+   685→      status: z.enum(ROUTE_STATUSES).optional(),
+   686→      description: optionalTrimmed(2000),
+   687→      effectiveFrom: z.string().datetime().nullish(),
+   688→      steps: z
+   689→        .array(
+   690→          z.object({
+   691→            sequence: z.number().int().min(1).optional(),
+   692→            operationId: z.string().uuid(),
+   693→            machineId: z.string().uuid().nullish(),
+   694→            dieId: z.string().uuid().nullish(),
+   695→            setupTimeMin: z.number().int().min(0).nullish(),
+   696→            cycleTimeSec: decimalField,
+   697→            scrapFactorPct: z.union([z.number(), z.string()]).transform(String).optional(),
+   698→            requiredTonnage: decimalField,
+   699→            description: optionalTrimmed(500),
+   700→          }),
+   701→        )
+   702→        .max(30)
+   703→        .optional(),
+   704→    }),
+   705→    update: z.object({
+   706→      name: optionalTrimmed(190),
+   707→      status: z.enum(ROUTE_STATUSES).optional(),
+   708→      description: optionalTrimmed(2000),
+   709→      effectiveFrom: z.string().datetime().nullish(),
+   710→      steps: z
+   711→        .array(
+   712→          z.object({
+   713→            sequence: z.number().int().min(1).optional(),
+   714→            operationId: z.string().uuid(),
+   715→            machineId: z.string().uuid().nullish(),
+   716→            dieId: z.string().uuid().nullish(),
+   717→            setupTimeMin: z.number().int().min(0).nullish(),
+   718→            cycleTimeSec: decimalField,
+   719→            scrapFactorPct: z.union([z.number(), z.string()]).transform(String).optional(),
+   720→            requiredTonnage: decimalField,
+   721→            description: optionalTrimmed(500),
+   722→          }),
+   723→        )
+   724→        .max(30)
+   725→        .optional(),
+   726→    }),
+   727→    remove: 'hard',
+   728→    columns: [
+   729→      { header: 'قطعه', get: (r) => r.part?.nameFa ?? '' },
+   730→      { header: 'شماره قطعه', get: (r) => r.part?.partNumber ?? '' },
+   731→      { header: 'نسخه', key: 'version' },
+   732→      { header: 'نام', get: (r) => r.name },
+   733→      { header: 'وضعیت', get: (r) => r.status },
+   734→      { header: 'تعداد عملیات', get: (r) => r.steps?.length ?? 0 },
+   735→      { header: 'تعداد دستور کار', get: (r) => r._count?.manufacturingOrders ?? 0 },
+   736→    ],
+   737→  },
+   738→
+   739→  bom: {
+   740→    key: 'bom',
+   741→    model: 'partMaterialRequirement',
+   742→    permModule: 'masterdata',
+   743→    labelFa: 'سرانه مصرف (BOM)',
+   744→    uniqueField: 'id',
+   745→    searchFields: ['notes'],
+   746→    searchRelations: { part: ['partNumber', 'nameFa'], material: ['materialCode', 'nameFa'] },
+   747→    filters: ['partId', 'materialId'],
+   748→    enumFilters: {},
+   749→    orderBy: { createdAt: 'asc' },
+   750→    include: {
+   751→      part: { select: { partNumber: true, nameFa: true } },
+   752→      material: { select: { materialCode: true, nameFa: true } },
+   753→    },
+   754→    create: z.object({
+   755→      partId: z.string().uuid(),
+   756→      materialId: z.string().uuid(),
+   757→      quantityPerUnit: z.union([z.number(), z.string()]).transform(String),
+   758→      weightKgPerUnit: decimalField,
+   759→      notes: optionalTrimmed(500),
+   760→    }),
+   761→    update: z.object({
+   762→      quantityPerUnit: z.union([z.number(), z.string()]).transform(String).optional(),
+   763→      weightKgPerUnit: decimalField,
+   764→      notes: optionalTrimmed(500),
+   765→    }),
+   766→    remove: 'hard',
+   767→    columns: [
+   768→      { header: 'قطعه', get: (r) => r.part?.nameFa ?? '' },
+   769→      { header: 'شماره قطعه', get: (r) => r.part?.partNumber ?? '' },
+   770→      { header: 'ماده', get: (r) => r.material?.nameFa ?? '' },
+   771→      { header: 'کد ماده', get: (r) => r.material?.materialCode ?? '' },
+   772→      { header: 'مقدار در هر عدد', key: 'quantityPerUnit' },
+   773→      { header: 'وزن در هر عدد (کیلوگرم)', get: (r) => r.weightKgPerUnit },
+   774→      { header: 'توضیحات', get: (r) => r.notes },
+   775→    ],
+   776→    import: {
+   777→      example: { 'شماره قطعه': 'K-1234', 'کد ماده': 'SHEET-ST12-1.5', 'مقدار در هر عدد': '2.1' },
+   778→      columns: [
+   779→        { header: 'شماره قطعه', key: 'partId', ref: 'part', required: true },
+   780→        { header: 'کد ماده', key: 'materialId', ref: 'material', required: true },
+   781→        { header: 'مقدار در هر عدد', key: 'quantityPerUnit', kind: 'decimal', required: true },
+   782→        { header: 'وزن در هر عدد (کیلوگرم)', key: 'weightKgPerUnit', kind: 'decimal' },
+   783→        { header: 'توضیحات', key: 'notes' },
+   784→      ],
+   785→    },
+   786→  },
+   787→};
+   788→
+   789→/** Guard used by routes — throws a 404-style ApiError when unknown. */
+   790→export function getResource(key: string): ResourceDef {
+   791→  const def = RESOURCES[key];
+   792→  if (!def) throw new ApiError(404, `Unknown resource: ${key}`, 'موجودیت شناخته‌شده نیست');
+   793→  return def;
+   794→}
+   795→

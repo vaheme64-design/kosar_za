@@ -214,12 +214,13 @@ export const createReservationSchema = z
   });
 
 // ---------------------------------------------------------------------------
-// Contracts (SAPCO)
+// Material contracts (قراردادهای ماده اولیه — تأمین‌کنندهٔ پیش‌فرض از تنظیمات
+// سامانه خوانده می‌شود، در کد نوشته نشده است)
 // ---------------------------------------------------------------------------
 
 export const createContractSchema = z.object({
   contractNumber: z.string().trim().min(1).max(32),
-  supplierName: z.string().trim().max(190).default('SAPCO'),
+  supplierName: z.string().trim().max(190).optional(),
   materialId: z.string().uuid(),
   orderDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   expectedDeliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),

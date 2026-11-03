@@ -5,6 +5,8 @@ import { api } from '../../lib/api';
 import { useLookups } from '../../lib/lookups';
 import { Page, Card, Modal, Field, TextInput, Select, Button, Table, EmptyState, Loading, ErrorBanner, Badge, Qty, Progress, fa } from '../../components/ui';
 import { SubNav } from '../../components/SubNav';
+import { QuickCreateButton } from '../../components/quickcreate/QuickCreate';
+import { partQuickCreate } from '../../lib/quickCreateSpecs';
 
 interface MoRow {
   id: string;
@@ -22,7 +24,7 @@ interface MoRow {
 }
 
 export function ProductionPage() {
-  const { lookups, loading: lookupsLoading } = useLookups();
+  const { lookups, loading: lookupsLoading, reload } = useLookups();
   const [rows, setRows] = useState<MoRow[]>([]);
   const [statusFilter, setStatusFilter] = useState('');
   const [loading, setLoading] = useState(true);
@@ -164,12 +166,21 @@ export function ProductionPage() {
         <Modal title="دستور کار جدید" onClose={() => setModal(false)}>
           <div className="form-grid">
             <Field label="قطعه" required hint="قطعه باید مسیر تولید تأییدشده داشته باشد">
-              <Select value={form.partId} onChange={(e) => setForm((f) => ({ ...f, partId: e.target.value, routeId: '' }))}>
-                <option value="">— انتخاب قطعه —</option>
-                {lookups.parts.map((p) => (
-                  <option key={p.id} value={p.id}>{p.partNumber} — {p.nameFa}</option>
-                ))}
-              </Select>
+              <div className="inline-controls">
+                <Select value={form.partId} onChange={(e) => setForm((f) => ({ ...f, partId: e.target.value, routeId: '' }))}>
+                  <option value="">— انتخاب قطعه —</option>
+                  {lookups.parts.map((p) => (
+                    <option key={p.id} value={p.id}>{p.partNumber} — {p.nameFa}</option>
+                  ))}
+                </Select>
+                <QuickCreateButton
+                  spec={partQuickCreate(lookups)}
+                  onCreated={async (id) => {
+                    await reload();
+                    if (id) setForm((f) => ({ ...f, partId: id }));
+                  }}
+                />
+              </div>
             </Field>
             <Field label="مقدار" required>
               <TextInput type="number" min="1" step="1" value={form.quantity} onChange={(e) => setForm((f) => ({ ...f, quantity: e.target.value }))} />

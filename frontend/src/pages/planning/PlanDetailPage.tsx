@@ -418,7 +418,7 @@ export function PlanDetailPage() {
                 {line.materialShortages.length > 0 && (
                   <>
                     <h4 style={{ margin: '14px 0 6px' }}>مواد اولیه</h4>
-                    <Table dense head={['ماده', 'شدت', 'موردنیاز', 'موجود (تأییدشده)', 'امانی SAPCO', 'کسری', 'پوشش قرارداد باز', 'قراردادها']}>
+                    <Table dense head={['ماده', 'شدت', 'موردنیاز', 'موجود (تأییدشده)', 'امانی تأمین‌کننده', 'کسری', 'پوشش قرارداد باز', 'قراردادها']}>
                       {line.materialShortages.map((m) => (
                         <tr key={m.id}>
                           <td><strong>{m.material.materialCode}</strong><div className="muted" style={{ fontSize: 11 }}>{m.material.nameFa}</div></td>

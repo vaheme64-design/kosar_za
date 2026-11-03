@@ -33,6 +33,7 @@ async function main(): Promise<void> {
     console.log(`[seed] users already exist (${existingUsers}) — skipping full seed (idempotent).`);
     await ensureDemoBom();
     await ensurePlanningPostGrant();
+    await ensureDefaultSupplierSetting();
     return;
   }
 
@@ -343,7 +344,7 @@ async function main(): Promise<void> {
     ['wip', 'قطعات در جریان ساخت'],
     ['planning', 'برنامه‌ریزی تولید'],
     ['capacity', 'ماشین‌آلات و ظرفیت'],
-    ['materials', 'مواد SAPCO'],
+    ['materials', 'قراردادها و مواد تأمین‌کننده'],
     ['reports', 'گزارش‌ها'],
     ['settings', 'کاربران و تنظیمات'],
   ];
@@ -441,6 +442,8 @@ async function main(): Promise<void> {
     ['inventory.allowNegativeStock', 'false', 'BOOLEAN', 'اجازه موجودی منفی'],
     ['planning.defaultHorizonDays', '30', 'NUMBER', 'افق پیش‌فرض برنامه‌ریزی (روز)'],
     ['app.version', '0.1.0', 'STRING', 'نسخه طرح دیتابیس/سامانه'],
+    // تأمین‌کنندهٔ پیش‌فرض قراردادهای ماده اولیه — کاملاً قابل تغییر از صفحهٔ تنظیمات
+    ['materials.defaultSupplierName', 'SAPCO', 'STRING', 'نام تأمین‌کنندهٔ پیش‌فرض قراردادهای ماده اولیه (قابل تغییر — مثلاً نام تأمین‌کنندهٔ واقعی ورق)'],
   ];
   for (const [key, value, valueType, description] of settings) {
     await db.systemSetting.create({ data: { key, value, valueType, description } });
@@ -449,12 +452,32 @@ async function main(): Promise<void> {
   console.log('[seed] demo master data created:');
   console.log(`        - units, ${moduleDefs.length * actionDefs.length} permissions, 4 roles, 4 users`);
   console.log('        - 8 operations, 14 machines, 4 dies, 4 warehouses, 3 shifts, 3 customers');
-  console.log('        - 5 materials (SAPCO), 5 parts, 5 production routes (1 active + 4 draft)');
-  console.log('        - 7 document sequences, 6 system settings');
+  console.log('        - 5 materials, 5 parts, 5 production routes (1 active + 4 draft)');
+  console.log('        - 7 document sequences, 7 system settings');
   console.log('[seed] demo users: admin | planner | keeper | viewer  — password: Kpims@1404');
   console.log('[seed] NO operational transactions were created (by design in Phase 1).');
   await ensureDemoBom();
   await ensurePlanningPostGrant();
+  await ensureDefaultSupplierSetting();
+}
+
+/**
+ * Idempotent backfill for existing databases: the configurable default
+ * supplier for material contracts (replaces the former hardcoded 'SAPCO').
+ * Only inserts when the key does not exist — never overwrites user edits.
+ */
+async function ensureDefaultSupplierSetting(): Promise<void> {
+  const exists = await db.systemSetting.findUnique({ where: { key: 'materials.defaultSupplierName' }, select: { id: true } });
+  if (exists) return;
+  await db.systemSetting.create({
+    data: {
+      key: 'materials.defaultSupplierName',
+      value: 'SAPCO',
+      valueType: 'STRING',
+      description: 'نام تأمین‌کنندهٔ پیش‌فرض قراردادهای ماده اولیه (قابل تغییر — مثلاً نام تأمین‌کنندهٔ واقعی ورق)',
+    },
+  });
+  console.log('[seed] materials.defaultSupplierName=SAPCO added (قابل تغییر در تنظیمات سامانه).');
 }
 
 /**

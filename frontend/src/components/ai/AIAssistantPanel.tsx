@@ -197,7 +197,7 @@ export function AIAssistantPanel() {
             <div className="ai-msgs">
               {messages.length === 0 && (
                 <div className="ai-msgs__empty">
-                  سؤالی درباره KPIMS بپرسید؛ مثلاً «لوت‌های امانی SAPCO چی هستند؟» یا «قطع‌بوش سند یعنی چه؟»
+                  سؤالی درباره KPIMS بپرسید؛ مثلاً «لوت‌های امانی تأمین‌کننده چی هستند؟» یا «قطع‌بوش سند یعنی چه؟»
                 </div>
               )}
               {messages.map((m, i) => (

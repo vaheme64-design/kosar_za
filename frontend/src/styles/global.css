@@ -1438,3 +1438,63 @@ code {
   padding: 1px 8px;
   margin-top: 4px;
 }
+
+/* ============================================================
+   فاز ۸ — Command palette، ایجاد سریع و داشبورد Odoo/ERPNext
+   ============================================================ */
+
+/* ---- command palette footer + inline quick-create ---- */
+.gsearch__footer {
+  display: flex; gap: 14px; align-items: center; justify-content: flex-start;
+  padding: 8px 12px; border-top: 1px solid var(--border); margin-top: 6px;
+  font-size: 0.68rem; color: var(--text-2);
+}
+.gsearch__footer span { display: inline-flex; align-items: center; gap: 4px; }
+
+.icon-btn--add { color: var(--primary-strong); border: 1px dashed var(--primary); background: var(--primary-soft); flex-shrink: 0; }
+.icon-btn--add:hover { background: #dbeafe; border-color: var(--primary-strong); }
+.inline-controls { display: flex; gap: 6px; align-items: center; width: 100%; }
+.inline-controls > .input, .inline-controls > .input--select { flex: 1; min-width: 0; }
+.inline-controls > .icon-btn { width: 30px; height: 34px; display: inline-flex; align-items: center; justify-content: center; }
+
+/* ---- ERPNext number cards (clickable KPI row) ---- */
+.number-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.number-card {
+  display: block; text-decoration: none; color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--surface);
+  transition: border-color 0.15s ease, transform 0.12s ease, box-shadow 0.15s ease;
+}
+.number-card:hover { border-color: var(--primary); transform: translateY(-2px); box-shadow: 0 6px 18px rgba(15, 23, 42, 0.07); }
+.number-card__value { font-size: 1.35rem; font-weight: 800; line-height: 1.3; }
+.number-card__label { font-size: 0.74rem; color: var(--text-2); font-weight: 700; margin-top: 2px; }
+.number-card__sub { font-size: 0.68rem; color: var(--text-2); margin-top: 4px; }
+
+/* ---- Odoo quick actions ---- */
+.quick-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.quick-action {
+  display: inline-flex; align-items: center; gap: 8px; text-decoration: none; font: inherit;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  border-radius: 999px; padding: 9px 16px; font-size: 0.83rem; font-weight: 700; cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.quick-action:hover { border-color: var(--primary); color: var(--primary-strong); background: var(--primary-soft); }
+.quick-action svg { color: var(--primary-strong); }
+.quick-action--primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.quick-action--primary svg { color: #fff; }
+.quick-action--primary:hover { background: var(--primary-strong); color: #fff; }
+
+/* ---- Odoo apps grid (module tiles) ---- */
+.apps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
+.app-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center;
+  text-decoration: none; color: var(--text); border: 1px solid var(--border); border-radius: 14px;
+  padding: 16px 10px 12px; background: var(--surface);
+  transition: border-color 0.15s ease, transform 0.12s ease, box-shadow 0.15s ease;
+}
+.app-tile:hover { border-color: var(--primary); transform: translateY(-3px); box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08); }
+.app-tile__icon {
+  width: 44px; height: 44px; border-radius: 13px; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--primary-soft), #dbeafe); color: var(--primary-strong);
+}
+.app-tile__label { font-size: 0.82rem; font-weight: 800; }
+.app-tile__en { font-size: 0.66rem; color: var(--text-2); direction: ltr; }
